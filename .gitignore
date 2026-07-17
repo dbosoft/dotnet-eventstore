@@ -1,0 +1,47 @@
+## Build results
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+artifacts/
+
+## Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Rider / ReSharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+## Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+[Cc]overage/
+coverage*.json
+coverage*.xml
+
+## NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+project.assets.json
+
+## Local tooling output
+inspect.sarif
+
+## Misc
+*.tmp
+*.cache
+.DS_Store
+Thumbs.db
+
+## Claude Code
+.claude/settings.local.json
+CLAUDE.local.md
