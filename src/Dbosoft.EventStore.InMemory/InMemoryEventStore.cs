@@ -18,12 +18,19 @@ public sealed class InMemoryEventStore
     private readonly List<Entry> _all = [];
     private readonly Dictionary<string, List<StoredSnapshot>> _snapshots = new(StringComparer.Ordinal);
     private readonly TimeProvider _timeProvider;
+    private readonly bool _inBandMarkers;
+    private readonly TimeSpan _tombstoneRetention;
     private long _sequence;
 
-    /// <summary>Creates the store, optionally with a custom time source for testing.</summary>
-    public InMemoryEventStore(TimeProvider? timeProvider = null)
+    /// <summary>Creates the store, optionally with a custom time source and marker policy.</summary>
+    public InMemoryEventStore(
+        TimeProvider? timeProvider = null,
+        bool inBandMarkers = false,
+        TimeSpan? tombstoneRetention = null)
     {
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _inBandMarkers = inBandMarkers;
+        _tombstoneRetention = tombstoneRetention ?? TimeSpan.FromDays(7);
         Snapshots = new InMemorySnapshotStore(this);
     }
 
@@ -231,7 +238,7 @@ public sealed class InMemoryEventStore
             _all.RemoveAll(e => e.StreamId == streamId && e.StreamVersion < beforeVersion);
             state.TruncatedBefore = beforeVersion;
 
-            EmitMarker(SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion));
+            EmitMarker(SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion), streamId);
             return Task.CompletedTask;
         }
     }
@@ -256,7 +263,8 @@ public sealed class InMemoryEventStore
             else
                 state.EventIds.Clear();
 
-            EmitMarker(SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode));
+            // Whole-stream deletion always goes to $system — the stream is gone.
+            EmitMarker(SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null);
             return Task.CompletedTask;
         }
     }
@@ -286,7 +294,7 @@ public sealed class InMemoryEventStore
             if (allIndex >= 0)
                 _all[allIndex] = redacted;
 
-            EmitMarker(SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version));
+            EmitMarker(SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId);
             return Task.CompletedTask;
         }
     }
@@ -296,27 +304,38 @@ public sealed class InMemoryEventStore
     {
         ct.ThrowIfCancellationRequested();
 
-        // Truncation and deletion already free memory eagerly here, so a scavenge pass only reports.
+        // Truncation and deletion already free stream memory eagerly. What a scavenge reclaims here is
+        // expired $system tombstones — transient markers kept only long enough to propagate.
         lock (_gate)
         {
+            long removed = 0;
+            var cutoff = _timeProvider.GetUtcNow() - _tombstoneRetention;
+            if (_streams.TryGetValue(SystemEventTypes.SystemStream, out var sys))
+            {
+                removed = sys.Events.RemoveAll(e => e.CreatedAt < cutoff);
+                _all.RemoveAll(e => e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < cutoff);
+            }
+
             var processed = options?.MaxStreams is { } max ? Math.Min(_streams.Count, max) : _streams.Count;
-            return Task.FromResult(new ScavengeReport(processed, 0));
+            return Task.FromResult(new ScavengeReport(processed, removed));
         }
     }
 
-    // Appends a system marker event into $all so read models learn to forget or reproject. Kept in a
-    // reserved "$system" stream; must be called while holding the gate.
-    private void EmitMarker(string eventType, object marker)
+    // Appends a marker event into $all so read models learn to forget or reproject. Goes on the
+    // reserved "$system" stream by default, or in-band on the affected stream when the domain opts in
+    // and the op is survivable (inBandStream != null). Must be called while holding the gate.
+    private void EmitMarker(string eventType, object marker, string? inBandStream)
     {
-        if (!_streams.TryGetValue(SystemEventTypes.SystemStream, out var sys))
+        var streamId = _inBandMarkers && inBandStream is not null ? inBandStream : SystemEventTypes.SystemStream;
+        if (!_streams.TryGetValue(streamId, out var target))
         {
-            sys = new StreamState();
-            _streams[SystemEventTypes.SystemStream] = sys;
+            target = new StreamState();
+            _streams[streamId] = target;
         }
 
         var entry = new Entry(
-            SystemEventTypes.SystemStream,
-            sys.Version + 1,
+            streamId,
+            target.Version + 1,
             ++_sequence,
             Guid.NewGuid(),
             eventType,
@@ -325,8 +344,8 @@ public sealed class InMemoryEventStore
             "application/json",
             _timeProvider.GetUtcNow());
 
-        sys.Version = entry.StreamVersion;
-        sys.Events.Add(entry);
+        target.Version = entry.StreamVersion;
+        target.Events.Add(entry);
         _all.Add(entry);
     }
 

@@ -15,6 +15,8 @@ public sealed class DomainBuilder
     private readonly List<Func<IServiceProvider, IEventUpcaster>> _upcasters = [];
     private readonly EventTypeRegistry _registry = new();
 
+    internal DomainOptions Options { get; private set; } = new();
+
     internal DomainBuilder(string name, IServiceCollection services)
     {
         Name = name;
@@ -33,6 +35,23 @@ public sealed class DomainBuilder
 
     /// <summary>The underlying service collection.</summary>
     public IServiceCollection Services { get; }
+
+    /// <summary>
+    /// Emits survivable destructive markers (truncate, redact) in-band on the affected stream instead
+    /// of the <c>$system</c> stream. Only for domains whose streams are read, not folded as aggregates.
+    /// </summary>
+    public DomainBuilder EmitMarkersInBand(bool inBand = true)
+    {
+        Options = Options with { InBandMarkers = inBand };
+        return this;
+    }
+
+    /// <summary>Sets how long <c>$system</c> tombstones are retained before scavenging.</summary>
+    public DomainBuilder WithTombstoneRetention(TimeSpan retention)
+    {
+        Options = Options with { TombstoneRetention = retention };
+        return this;
+    }
 
     /// <summary>Registers a single event type under a logical name (defaulting to the type's name).</summary>
     public DomainBuilder AddEventType<TEvent>(string? eventType = null)

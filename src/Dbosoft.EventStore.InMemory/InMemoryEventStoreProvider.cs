@@ -12,13 +12,17 @@ namespace Dbosoft.EventStore.InMemory;
 public sealed class InMemoryEventStoreProvider : IEventStoreProvider
 {
     private readonly ConcurrentDictionary<string, InMemoryEventStore> _stores = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DomainOptions> _options;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates the provider for the registered domains.</summary>
     public InMemoryEventStoreProvider(IEnumerable<RegisteredDomain> domains, TimeProvider timeProvider)
     {
         _timeProvider = timeProvider;
-        Domains = domains.Select(d => d.Name).Distinct(StringComparer.Ordinal).ToArray();
+        _options = domains
+            .GroupBy(d => d.Name, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Options, StringComparer.Ordinal);
+        Domains = _options.Keys.ToArray();
     }
 
     /// <inheritdoc />
@@ -31,5 +35,9 @@ public sealed class InMemoryEventStoreProvider : IEventStoreProvider
     public ISnapshotStore GetSnapshotStore(string domain) => Store(domain).Snapshots;
 
     private InMemoryEventStore Store(string domain) =>
-        _stores.GetOrAdd(domain, _ => new InMemoryEventStore(_timeProvider));
+        _stores.GetOrAdd(domain, key =>
+        {
+            var options = _options.GetValueOrDefault(key) ?? new DomainOptions();
+            return new InMemoryEventStore(_timeProvider, options.InBandMarkers, options.TombstoneRetention);
+        });
 }

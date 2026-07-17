@@ -34,8 +34,9 @@ public sealed class EventStoreBuilder
     /// </summary>
     public EventStoreBuilder AddDomain(string name, Action<DomainBuilder> configure)
     {
-        RegisterDomain(name);
-        configure(new DomainBuilder(name, Services));
+        var domain = new DomainBuilder(name, Services);
+        configure(domain);
+        RegisterDomain(name, domain.Options);
         return this;
     }
 
@@ -122,17 +123,17 @@ public sealed class EventStoreBuilder
             if (field is not null)
                 return field;
 
-            RegisterDomain(DefaultDomainName);
+            RegisterDomain(DefaultDomainName, new DomainOptions());
             return field = new DomainBuilder(DefaultDomainName, Services);
         }
     }
 
-    private void RegisterDomain(string name)
+    private void RegisterDomain(string name, DomainOptions options)
     {
         if (_domains.Contains(name))
             return;
 
         _domains.Add(name);
-        Services.AddSingleton(new RegisteredDomain(name));
+        Services.AddSingleton(new RegisteredDomain(name, options));
     }
 }

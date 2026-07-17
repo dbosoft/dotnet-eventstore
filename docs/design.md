@@ -509,6 +509,25 @@ Markers materialize to typed records (`StreamTruncatedMarker`, `StreamDeletedMar
 `EventRedactedMarker`) via `IEventMaterializer`, which recognizes the reserved `$`-prefixed types and
 reads them as JSON regardless of the domain's serializer — so a bus consumer handles them uniformly.
 
+**Where the marker lands is a per-domain choice** (`DomainOptions`, the vocabulary being *domain* =
+storage unit, *stream* = one event sequence within it):
+
+- **`$system` (default).** Truncate/redact/delete markers go to the reserved `$system` stream, which
+  shows up in the domain's `$all`. This keeps aggregate streams pure — a marker must never land in a
+  folded stream, where it would take a version slot and break the aggregate's optimistic concurrency.
+- **In-band (`EmitMarkersInBand()`), opt-in for non-folded domains.** For log-like domains whose
+  streams are read, not folded, a survivable marker (truncate, redact) is written *on the affected
+  stream itself*, so a per-stream reader sees the deletion in the stream's own flow. **Whole-stream
+  deletion always uses `$system`** — the stream is gone, there is nowhere else to put it. The
+  aggregate repository additionally skips `$`-typed events when folding, as a safety net.
+
+**Tombstone lifecycle.** The `$system` stream is itself an append-only log — under frequent retention
+(the access-log case) it would grow without bound. So markers are **transient tombstones**: the
+scavenger removes them after `DomainOptions.TombstoneRetention` (default 7 days, `TimeProvider`-driven
+and testable). The contract, stated plainly: a consumer must catch up within that window or it misses
+the deletion notification. A checkpoint-aware variant (never scavenge before the slowest consumer)
+is a possible later refinement; the time-based window is the first cut.
+
 ## 8. Testing — the heart of the agnosticism
 
 `Dbosoft.EventStore.Testing` as a **public** package: an abstract `EventStoreConformanceTests`

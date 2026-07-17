@@ -80,6 +80,12 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
                            .ConfigureAwait(false))
         {
             exists = true;
+
+            // Safety net: system markers must never reach an aggregate's fold — they carry no state
+            // and would miscount the version. Aggregate domains use $system, so this is belt-and-braces.
+            if (SystemEventTypes.IsSystem(stored.EventType))
+                continue;
+
             aggregate.ReplayEvent(_materializer.Materialize(stored));
         }
 
