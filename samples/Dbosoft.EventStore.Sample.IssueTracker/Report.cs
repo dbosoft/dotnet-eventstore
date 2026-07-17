@@ -38,14 +38,14 @@ internal static class Report
     public static void Section(string text)
     {
         Console.WriteLine();
-        Console.WriteLine(Paint("▶ " + text, Cyan + Bold));
+        Console.WriteLine(Paint("» " + text, Cyan + Bold));
     }
 
-    public static void Bullet(string text) => Console.WriteLine("  • " + text);
+    public static void Bullet(string text) => Console.WriteLine("  - " + text);
 
     public static void Note(string text) => Console.WriteLine(Paint("    " + text, Dim));
 
-    public static void Warn(string text) => Console.WriteLine(Paint("  ⚠ " + text, Yellow));
+    public static void Warn(string text) => Console.WriteLine(Paint("  ! " + text, Yellow));
 
     public static void Outro(string text)
     {

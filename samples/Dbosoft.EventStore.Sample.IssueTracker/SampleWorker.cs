@@ -1,3 +1,4 @@
+using System.Globalization;
 using Dbosoft.EventStore.Aggregates;
 using Dbosoft.EventStore.Serialization;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,11 +8,12 @@ namespace Dbosoft.EventStore.Sample.IssueTracker;
 
 /// <summary>
 /// Drives the sample as a hosted service against on-disk SQLite, presenting the run as a readable
-/// narrative (see <see cref="Report"/>). It is written to be run more than once: the first run seeds a
-/// fresh database and redacts a leaked email; each later run loads an issue from its persisted
-/// snapshot, appends to it, and shows both the board (rebuilt in full, proving the earlier run's data
-/// survived) and the durable notifier (resuming from its saved checkpoint). Aggregate work runs inside
-/// a DI scope, as it would per message in a real app.
+/// narrative (see <see cref="Report"/>). Every run opens a couple of new issues with randomly varied
+/// content and touches an existing one, so the board grows and looks different each time. State
+/// persists between runs: the board is rebuilt in full (proving earlier runs survived), an issue is
+/// loaded from its snapshot, a leaked email is redacted in place, and the durable notifier resumes
+/// from its saved checkpoint to deliver only what is new. Aggregate work runs inside a DI scope, as it
+/// would per message in a real app.
 /// </summary>
 internal sealed class SampleWorker(
     IServiceScopeFactory scopeFactory,
@@ -22,109 +24,180 @@ internal sealed class SampleWorker(
 {
     public const string Tracking = "tracking";
     public const string DatabaseFile = "issues.db";
+    public const int SnapshotInterval = 10;
 
-    private const string PrimaryIssue = "ISSUE-1";
-    private const string ContactIssue = "ISSUE-2";
+    private static readonly string[] Titles =
+    [
+        "Login page returns 500", "Cannot reset password", "Timeout exporting large reports",
+        "Search returns stale results", "Mobile layout overlaps the footer", "Webhook retries never stop",
+        "CSV import silently drops rows", "Dark mode flickers on load", "Session expires too early",
+        "Duplicate emails on signup", "Pagination skips the last page", "Uploads fail over 10 MB"
+    ];
+
+    private static readonly string[] People =
+        ["grace", "ada", "linus", "mallory", "hedy", "alan", "edsger", "radia", "katherine"];
+
+    private static readonly string[] CommentTexts =
+    [
+        "reproduced on staging", "cannot reproduce locally", "added more logging", "looks like a race",
+        "needs a database migration", "waiting on review", "pushed a tentative fix", "reverted, made it worse",
+        "narrowed it to the cache layer", "customer confirmed the workaround", "bisected to last week's deploy"
+    ];
+
+    private static readonly string[] Resolutions =
+    [
+        "deployed a hotfix", "corrected the configuration", "duplicate of an earlier report",
+        "fixed in the nightly build", "resolved by the cache rewrite"
+    ];
+
+    private static readonly string[] ReopenReasons =
+        ["it resurfaced after the latest deploy", "a customer hit it again", "the fix did not hold"];
+
+    private readonly Random _rng = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var board = new IssueBoardProjection((IAllStreamReader)store, materializer);
         var notifier = new ActivityNotifier((IAllStreamReader)store, materializer, checkpoints);
 
-        var firstRun = await LoadIssueAsync(PrimaryIssue, stoppingToken) is null;
+        var existing = await board.RebuildAsync(stoppingToken);
 
         Report.Banner("Issue Tracker", "Event sourcing on the EF Core / SQLite provider");
-        Report.KeyValue("Database", $"{DatabaseFile}  ({(firstRun ? "fresh" : "existing — written by a previous run")})");
+        Report.KeyValue("Database", existing.Count == 0
+            ? $"{DatabaseFile}  (fresh)"
+            : $"{DatabaseFile}  (existing — {existing.Count} issue(s) from earlier runs)");
 
-        if (firstRun)
+        if (existing.Count > 0)
         {
-            Report.Section("Seeding a fresh database");
-            await SeedAsync(stoppingToken);
-            Report.Board("Board after seeding", await board.RebuildAsync(stoppingToken));
-
-            Report.Warn("Comment ISSUE-2 / v2 leaked an email address — redacting it in place …");
-            await RedactLeakedContactAsync(stoppingToken);
-            Report.Board("Board after redaction — the payload was scrubbed on disk", await board.RebuildAsync(stoppingToken));
+            Report.Section("Updating an existing issue");
+            await UpdateRandomIssueAsync(existing, stoppingToken);
         }
-        else
+
+        Report.Section("Opening new issues");
+        var leak = await OpenRandomIssuesAsync(NextIssueNumber(existing), stoppingToken);
+
+        Report.Board("Board", await board.RebuildAsync(stoppingToken));
+
+        if (leak is { } spill)
         {
-            Report.Section("Continuing from persisted state");
-            await ContinueAsync(PrimaryIssue, stoppingToken);
-            Report.Board("Board rebuilt from $all — the earlier run's issues survived the restart",
-                await board.RebuildAsync(stoppingToken));
+            Report.Warn($"{spill.Issue} / v{spill.Version} leaked an email address — redacting it in place …");
+            var scrubbed = materializer.Dematerialize(new IssueCommented(spill.Author, "[redacted]")).Data;
+            await ((IStreamMaintenance)store).RedactEventAsync(StreamId(spill.Issue), spill.Version, scrubbed, ct: stoppingToken);
+            Report.Board("Board after redaction — the payload was scrubbed on disk", await board.RebuildAsync(stoppingToken));
         }
 
         var delivered = await notifier.RunAsync(stoppingToken);
         Report.Notifications(delivered.Resumed, delivered.Count, delivered.Lines);
 
-        Report.Outro($"State is persisted in {DatabaseFile} — run the sample again to watch the board and notifier resume.");
+        Report.Outro($"State is persisted in {DatabaseFile} — run the sample again to grow the board further.");
 
         lifetime.StopApplication();
     }
 
-    private async Task SeedAsync(CancellationToken ct)
+    private async Task UpdateRandomIssueAsync(IReadOnlyList<BoardRow> existing, CancellationToken ct)
     {
         using var scope = scopeFactory.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IAggregateRepository<Issue>>();
 
-        // A chatty issue: opening plus nine comments plus an assignment and a resolution cross the
-        // ten-event snapshot interval, so the repository writes a snapshot the next load rehydrates from.
-        var main = Issue.Report(PrimaryIssue, "Login page returns 500", "grace");
-        for (var i = 1; i <= 9; i++)
-            main.Comment(i % 2 == 0 ? "grace" : "ada", $"investigation note #{i}");
-        main.AssignTo("ada");
-        main.Resolve("deployed a hotfix for the null configuration value");
-        await repository.SaveAsync(main, ct);
-        Report.Bullet($"Opened {PrimaryIssue}, discussed it (9 comments), assigned to ada, and resolved it.");
-        Report.Note($"→ {main.Version} events written; a snapshot was taken at v{main.Version}.");
+        var target = existing[_rng.Next(existing.Count)];
+        var issue = await repository.LoadAsync(target.Id, ct);
+        if (issue is null)
+            return;
 
-        var withContact = Issue.Report(ContactIssue, "Cannot reset password", "mallory");
-        withContact.Comment("mallory", "reach me at mallory@example.com if you need more detail");
-        await repository.SaveAsync(withContact, ct);
-        Report.Bullet($"Opened {ContactIssue} with a comment that contains a personal email address.");
-    }
-
-    private async Task RedactLeakedContactAsync(CancellationToken ct)
-    {
-        // Overwrite the payload in place — same shape, same slot, same id — so a fresh read never sees
-        // the address; the $event-redacted marker tells already-caught-up consumers to forget it.
-        var scrubbed = materializer.Dematerialize(new IssueCommented("mallory", "[redacted]")).Data;
-        await ((IStreamMaintenance)store).RedactEventAsync(StreamId(ContactIssue), version: 2, scrubbed, ct: ct);
-    }
-
-    private async Task ContinueAsync(string id, CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var repository = scope.ServiceProvider.GetRequiredService<IAggregateRepository<Issue>>();
-
-        var issue = await repository.LoadAsync(id, ct)
-                    ?? throw new InvalidOperationException($"Issue '{id}' was expected but not found.");
+        var before = issue.Version;
+        var assignee = issue.Assignee is null ? "" : $", assignee {issue.Assignee}";
         Report.Bullet(
-            $"Loaded {id} \"{issue.Title}\" at v{issue.Version} [{issue.Status}, assignee {issue.Assignee ?? "none"}, "
-            + $"{issue.CommentCount} comments] — rehydrated from the snapshot, not replayed from event 1.");
+            $"Loaded {issue.Id} \"{issue.Title}\" at v{issue.Version} [{issue.Status}, {issue.CommentCount} comment(s)"
+            + $"{assignee}] — "
+            + (before >= SnapshotInterval ? "rehydrated from its snapshot plus tail." : "replayed from its events."));
 
-        // A resolved issue is reopened before the follow-up; once open, later runs just add a comment.
         if (issue.Status == Issue.Resolved)
         {
-            issue.Reopen("the problem resurfaced after the latest deploy");
-            Report.Bullet($"{id} was resolved → reopened it, then added a follow-up comment.");
-        }
-        else
-        {
-            Report.Bullet($"Added a follow-up comment to {id}.");
+            issue.Reopen(Pick(ReopenReasons));
+            Report.Note($"{issue.Id} was resolved → reopened it.");
         }
 
-        issue.Comment("ada", "follow-up after restart");
+        var added = _rng.Next(1, 4);
+        for (var i = 0; i < added; i++)
+            issue.Comment(Pick(People), Pick(CommentTexts));
         await repository.SaveAsync(issue, ct);
-        Report.Note($"→ {id} is now at v{issue.Version}.");
+
+        var snapshotted = Crossed(before, issue.Version) ? " (a snapshot was taken)" : "";
+        Report.Note($"Added {added} comment(s); {issue.Id} is now at v{issue.Version}{snapshotted}.");
     }
 
-    private async Task<Issue?> LoadIssueAsync(string id, CancellationToken ct)
+    private async Task<Leak?> OpenRandomIssuesAsync(int startNumber, CancellationToken ct)
     {
         using var scope = scopeFactory.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IAggregateRepository<Issue>>();
-        return await repository.LoadAsync(id, ct);
+
+        var count = _rng.Next(2, 4);
+        var leakIndex = _rng.Next(count);
+        Leak? leak = null;
+
+        for (var i = 0; i < count; i++)
+        {
+            var id = $"ISSUE-{startNumber + i}";
+            var reporter = Pick(People);
+            var issue = Issue.Report(id, Pick(Titles), reporter);
+
+            var comments = _rng.Next(0, 5);
+            for (var c = 0; c < comments; c++)
+                issue.Comment(Pick(People), Pick(CommentTexts));
+
+            if (i == leakIndex)
+            {
+                var author = Pick(People);
+                issue.Comment(author, $"reach me at {reporter}@example.com if you need more detail");
+                leak = new Leak(id, issue.Version, author);
+                comments++;
+            }
+
+            string? assignee = null;
+            if (_rng.Next(2) == 0)
+                issue.AssignTo(assignee = Pick(People));
+
+            var resolved = _rng.Next(3) == 0;
+            if (resolved)
+                issue.Resolve(Pick(Resolutions));
+
+            await repository.SaveAsync(issue, ct);
+            Report.Bullet($"Opened {id} \"{issue.Title}\" ({reporter}) · {Describe(comments, assignee, resolved)}");
+            if (issue.Version >= SnapshotInterval)
+                Report.Note($"→ {id} crossed the snapshot interval; a snapshot was taken.");
+        }
+
+        return leak;
     }
 
+    private static string Describe(int comments, string? assignee, bool resolved)
+    {
+        var parts = new List<string> { $"{comments} comment(s)" };
+        if (assignee is not null)
+            parts.Add($"assigned to {assignee}");
+        parts.Add(resolved ? "resolved" : "open");
+        return string.Join(" · ", parts);
+    }
+
+    // The next free issue number: one past the highest ISSUE-<n> already on the board.
+    private static int NextIssueNumber(IReadOnlyList<BoardRow> existing)
+    {
+        var highest = 0;
+        foreach (var row in existing)
+        {
+            var suffix = row.Id.StartsWith("ISSUE-", StringComparison.Ordinal) ? row.Id["ISSUE-".Length..] : row.Id;
+            if (int.TryParse(suffix, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > highest)
+                highest = n;
+        }
+
+        return highest + 1;
+    }
+
+    private static bool Crossed(long before, long after) => after / SnapshotInterval > before / SnapshotInterval;
+
+    private string Pick(string[] pool) => pool[_rng.Next(pool.Length)];
+
     private static string StreamId(string id) => $"{Issue.Category}-{id}";
+
+    private readonly record struct Leak(string Issue, long Version, string Author);
 }

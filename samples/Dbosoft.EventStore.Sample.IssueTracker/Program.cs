@@ -14,7 +14,9 @@ using Microsoft.Extensions.Logging;
 // streams clean). The EF Core provider creates a fresh context per operation from a factory — never a
 // global context — and persists snapshots and the consumer checkpoint. Run it twice with `dotnet run`.
 
-Console.OutputEncoding = Encoding.UTF8;
+// UTF-8 without a BOM: the box-drawing and arrow glyphs need UTF-8, but Encoding.UTF8 would emit a
+// byte-order mark that shows up as a stray character at the start of the output.
+Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -25,7 +27,7 @@ builder.Services.AddEventStore(eventStore => eventStore
     .UseSqlite($"Data Source={SampleWorker.DatabaseFile}")
     .AddDomain(SampleWorker.Tracking, tracking => tracking
         .AddEventTypesImplementing<IIssueEvent>()
-        .AddAggregateRepository(Issue.Category, id => new Issue(id), new EveryNEventsSnapshotPolicy(10))));
+        .AddAggregateRepository(Issue.Category, id => new Issue(id), new EveryNEventsSnapshotPolicy(SampleWorker.SnapshotInterval))));
 
 builder.Services.AddHostedService<SampleWorker>();
 
