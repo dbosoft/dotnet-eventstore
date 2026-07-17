@@ -5,17 +5,16 @@ namespace Dbosoft.EventStore.Aggregates;
 
 /// <summary>
 /// Default <see cref="IAggregateRepository{T}"/>. Maps aggregate ids to stream ids as
-/// <c>{category}-{id}</c>, serializes events through the registry and upcasts on read, and uses an
-/// optional snapshot store governed by a policy.
+/// <c>{category}-{id}</c>, maps events through the domain's <see cref="IEventMaterializer"/>, and uses
+/// an optional snapshot store governed by a policy.
 /// </summary>
 /// <typeparam name="T">The aggregate type.</typeparam>
 [PublicAPI]
 public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : AggregateBase
 {
     private readonly IEventStore _store;
+    private readonly IEventMaterializer _materializer;
     private readonly IEventSerializer _serializer;
-    private readonly IEventTypeRegistry _registry;
-    private readonly UpcasterChain _upcasters;
     private readonly ISnapshotStore? _snapshotStore;
     private readonly ISnapshotPolicy _snapshotPolicy;
     private readonly string _category;
@@ -23,27 +22,24 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
 
     /// <summary>Creates the repository for a stream category.</summary>
     /// <param name="store">The backing event store.</param>
-    /// <param name="serializer">Serializer for events and snapshots.</param>
-    /// <param name="registry">Registry mapping CLR event types to logical names.</param>
-    /// <param name="upcasters">Upcaster chain applied to events on read.</param>
+    /// <param name="materializer">Maps events between their stored bytes and typed instances.</param>
+    /// <param name="serializer">Serializer for snapshot state.</param>
     /// <param name="category">Stream-id prefix for this aggregate type.</param>
     /// <param name="factory">Creates an empty aggregate for a given id.</param>
     /// <param name="snapshotStore">Optional snapshot store enabling snapshot-based rehydration.</param>
     /// <param name="snapshotPolicy">When to write snapshots; ignored without a snapshot store.</param>
     public AggregateRepository(
         IEventStore store,
+        IEventMaterializer materializer,
         IEventSerializer serializer,
-        IEventTypeRegistry registry,
-        UpcasterChain upcasters,
         string category,
         Func<string, T> factory,
         ISnapshotStore? snapshotStore = null,
         ISnapshotPolicy? snapshotPolicy = null)
     {
         _store = store;
+        _materializer = materializer;
         _serializer = serializer;
-        _registry = registry;
-        _upcasters = upcasters;
         _category = category;
         _factory = factory;
         _snapshotStore = snapshotStore;
@@ -56,8 +52,9 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
     public async Task<T?> LoadAsync(string id, CancellationToken ct = default)
     {
         var streamId = StreamId(id);
+        var info = await _store.GetStreamInfoAsync(streamId, ct).ConfigureAwait(false);
         var aggregate = _factory(id);
-        var fromVersion = 0L;
+        var restoredVersion = 0L;
         var exists = false;
 
         if (_snapshotStore is not null && aggregate is ISnapshotable snapshotable)
@@ -66,17 +63,24 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
             if (snapshot is not null && TryDeserializeSnapshot(snapshotable, snapshot, out var state))
             {
                 snapshotable.RestoreFromSnapshot(state, snapshot.StreamVersion);
-                fromVersion = snapshot.StreamVersion + 1;
+                restoredVersion = snapshot.StreamVersion;
                 exists = true;
             }
         }
 
+        // If the stream is truncated below where we can start folding, the events needed to
+        // reconstruct the prefix are gone. A snapshot at or after the boundary is then load-bearing,
+        // not optional — fail loudly rather than fold a partial suffix into a silently wrong aggregate.
+        var truncatedBefore = info?.TruncatedBefore ?? 1;
+        if (truncatedBefore > 1 && restoredVersion < truncatedBefore - 1)
+            throw new SnapshotRequiredException(streamId, truncatedBefore);
+
         await foreach (var stored in _store
-                           .ReadStreamAsync(streamId, ReadDirection.Forwards, fromVersion, ct: ct)
+                           .ReadStreamAsync(streamId, ReadDirection.Forwards, restoredVersion + 1, ct: ct)
                            .ConfigureAwait(false))
         {
             exists = true;
-            aggregate.ReplayEvent(Deserialize(stored));
+            aggregate.ReplayEvent(_materializer.Materialize(stored));
         }
 
         return exists ? aggregate : null;
@@ -95,15 +99,7 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
 
         var data = new EventData[events.Count];
         for (var i = 0; i < events.Count; i++)
-        {
-            var @event = events[i];
-            data[i] = new EventData(
-                Guid.NewGuid(),
-                _registry.GetEventType(@event.GetType()),
-                _serializer.Serialize(@event),
-                Metadata: null,
-                _serializer.ContentType);
-        }
+            data[i] = _materializer.Dematerialize(events[i].Event, events[i].EventId);
 
         await _store.AppendToStreamAsync(streamId, versionBefore, data, ct).ConfigureAwait(false);
         aggregate.MarkCommitted();
@@ -116,13 +112,6 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
             await _snapshotStore.SaveAsync(streamId, versionAfter, state, _serializer.ContentType, ct)
                 .ConfigureAwait(false);
         }
-    }
-
-    private object Deserialize(StoredEvent stored)
-    {
-        var type = _registry.Resolve(stored.EventType);
-        var @event = _serializer.Deserialize(type, stored.Data);
-        return _upcasters.Upcast(@event);
     }
 
     /// <summary>

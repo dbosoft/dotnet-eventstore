@@ -8,7 +8,7 @@ namespace Dbosoft.EventStore.Aggregates;
 [PublicAPI]
 public abstract class AggregateBase
 {
-    private readonly List<object> _uncommitted = [];
+    private readonly List<UncommittedEvent> _uncommitted = [];
 
     /// <summary>Creates the aggregate with its identity.</summary>
     protected AggregateBase(string id) => Id = id;
@@ -22,15 +22,19 @@ public abstract class AggregateBase
     /// </summary>
     public long Version { get; private set; }
 
-    /// <summary>Events raised since the last load or save, awaiting persistence.</summary>
-    public IReadOnlyList<object> UncommittedEvents => _uncommitted;
+    /// <summary>
+    /// Events raised since the last load or save, awaiting persistence. Each carries a stable
+    /// <see cref="UncommittedEvent.EventId"/> assigned at raise time, so retrying a failed save
+    /// re-sends the same ids and the store treats it as an idempotent no-op rather than a duplicate.
+    /// </summary>
+    public IReadOnlyList<UncommittedEvent> UncommittedEvents => _uncommitted;
 
     /// <summary>Applies a new event to the aggregate and records it for persistence.</summary>
     protected void Raise(object @event)
     {
         When(@event);
         Version++;
-        _uncommitted.Add(@event);
+        _uncommitted.Add(new UncommittedEvent(Guid.NewGuid(), @event));
     }
 
     /// <summary>Applies a historical event during rehydration, advancing the version but not recording it.</summary>

@@ -128,4 +128,28 @@ public sealed class AggregateRepositoryTests
         loaded.Value.Should().Be(6);
         loaded.Version.Should().Be(6);
     }
+
+    [Fact]
+    public async Task Load_fails_loudly_when_truncated_and_the_covering_snapshot_is_unusable()
+    {
+        await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5));
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+        var provider = sp.GetRequiredService<IEventStoreProvider>();
+        var maintenance = (IStreamMaintenance)provider.GetStore(EventStoreBuilder.DefaultDomainName);
+        var snapshots = provider.GetSnapshotStore(EventStoreBuilder.DefaultDomainName)!;
+
+        var counter = new Counter("c1");
+        for (var i = 0; i < 6; i++)
+            counter.Increment(1);
+        await repo.SaveAsync(counter);
+
+        // Truncate behind the snapshot at v6, then corrupt that snapshot: the prefix events are gone
+        // and the only thing that could reconstruct them no longer deserializes.
+        await maintenance.TruncateStreamAsync("counter-c1", 6);
+        await snapshots.SaveAsync("counter-c1", 6, "\"not an object\""u8.ToArray());
+
+        var act = () => repo.LoadAsync("c1");
+
+        await act.Should().ThrowAsync<SnapshotRequiredException>();
+    }
 }

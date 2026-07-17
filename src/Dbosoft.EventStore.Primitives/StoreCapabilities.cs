@@ -12,19 +12,19 @@ public enum StoreCapabilities
     /// <summary>The core append/read contract only; no optional features.</summary>
     None = 0,
 
-    /// <summary>Events across all streams can be read in a single ordered sequence.</summary>
+    /// <summary>
+    /// Events across all streams in a domain can be read in a single ordered sequence — the basis
+    /// for replay, read-model rebuilds and forwarding to a message bus.
+    /// </summary>
     AllStreamReads = 1 << 0,
 
-    /// <summary>Subscriptions can follow that sequence from a checkpoint.</summary>
-    Subscriptions = 1 << 1,
-
     /// <summary>
-    /// A subscription never silently skips an event: once it reports a position, every event
-    /// ordered before that position has been delivered. Without this flag a subscription is
-    /// complete only eventually, and handlers must tolerate redelivery and reordering within the
-    /// store's safety window.
+    /// A catch-up read over that sequence is exact: reading forward from a position never silently
+    /// skips an event that will commit below the point already returned. Without this flag a
+    /// catch-up read is complete only up to a bounded staleness window, so readers must tolerate
+    /// re-reading and de-duplicate by <see cref="StoredEvent.EventId"/>.
     /// </summary>
-    ExactSubscriptions = 1 << 2,
+    ExactCatchup = 1 << 2,
 
     /// <summary>Events for several streams can be appended in one atomic operation.</summary>
     MultiStreamAtomicAppend = 1 << 3,

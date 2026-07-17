@@ -241,26 +241,45 @@ public abstract class EventStoreConformanceTests
         after[0].Position.Should().Be(all[1].Position);
     }
 
-    // ---- optional: subscriptions ----
+    // ---- idempotency (batch-scoped) ----
 
     [Fact]
-    public async Task Subscription_delivers_existing_and_live_events_in_order()
+    public async Task Exact_replay_of_a_batch_is_an_idempotent_no_op()
     {
         var store = CreateStore();
-        if (store is not ISubscriptionSource source || !store.Capabilities.HasFlag(StoreCapabilities.Subscriptions))
-            return;
+        var batch = Events(3);
 
-        await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(2));
+        var first = await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, batch);
+        var replay = await store.AppendToStreamAsync("s1", ExpectedVersion.Any, batch);
 
-        var handler = new RecordingHandler();
-        await using var _ = source.SubscribeToAll(GlobalPosition.Start, handler);
+        // The replay returns the original append's outcome, and nothing is written twice.
+        replay.NextExpectedVersion.Should().Be(first.NextExpectedVersion);
+        (await store.ReadAllOf("s1")).Should().HaveCount(3);
+    }
 
-        await WaitUntil(() => handler.Received.Count == 2, TimeSpan.FromSeconds(5));
-        await store.AppendToStreamAsync("b", ExpectedVersion.NoStream, Events(1));
-        await WaitUntil(() => handler.Received.Count == 3, TimeSpan.FromSeconds(5));
+    [Fact]
+    public async Task Partial_overlap_of_a_batch_is_rejected()
+    {
+        var store = CreateStore();
+        var a = Event();
+        var b = Event();
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, [a, b]);
 
-        handler.Received.Select(e => e.Position).Should().BeInAscendingOrder();
-        handler.Received.Select(e => e.StreamId).Should().Equal("a", "a", "b");
+        // [b, c] partially overlaps [a, b]: neither a clean retry nor a fully new append.
+        var act = () => store.AppendToStreamAsync("s1", ExpectedVersion.Any, [b, Event()]);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task Duplicate_event_id_within_a_batch_is_rejected()
+    {
+        var store = CreateStore();
+        var evt = Event();
+
+        var act = () => store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, [evt, evt]);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
     // ---- optional: time navigation ----

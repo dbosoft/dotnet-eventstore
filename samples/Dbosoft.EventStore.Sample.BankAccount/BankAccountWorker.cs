@@ -1,4 +1,5 @@
 using Dbosoft.EventStore.Aggregates;
+using Dbosoft.EventStore.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -6,13 +7,17 @@ using Microsoft.Extensions.Logging;
 namespace Dbosoft.EventStore.Sample.BankAccount;
 
 /// <summary>
-/// Drives the sample scenario as a hosted service: it starts a projection over the global stream,
-/// runs a few account commands under optimistic concurrency, then stops the host. Aggregate work
-/// runs inside a DI scope, as it would per request/message in a real application.
+/// Drives the sample as a hosted service: it runs a few account commands under optimistic
+/// concurrency, then rebuilds a read model by replaying the domain's global stream through the
+/// materializer. In production, live events reach read models over a message bus — the store does
+/// not deliver — so replay is how you build and rebuild a read model. Aggregate work runs inside a
+/// DI scope, as it would per request/message in a real application.
 /// </summary>
 internal sealed class BankAccountWorker(
     IServiceScopeFactory scopeFactory,
     [FromKeyedServices(BankAccountWorker.Domain)] IEventStore bankingStore,
+    [FromKeyedServices(BankAccountWorker.Domain)] IEventMaterializer materializer,
+    ICheckpointStore checkpoints,
     ILoggerFactory loggerFactory,
     ILogger<BankAccountWorker> logger,
     IHostApplicationLifetime lifetime) : BackgroundService
@@ -20,25 +25,12 @@ internal sealed class BankAccountWorker(
     /// <summary>The domain the banking events live in.</summary>
     public const string Domain = "banking";
 
+    private const string ReadModelCheckpoint = "banking/account-read-model";
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // The domain's store exposes the optional interfaces it supports (see StoreCapabilities).
-        var subscriptions = (ISubscriptionSource)bankingStore;
-        var allStream = (IAllStreamReader)bankingStore;
-
-        var projection = new ConsoleProjection(loggerFactory.CreateLogger<ConsoleProjection>());
-        await using var subscription = subscriptions.SubscribeToAll(GlobalPosition.Start, projection);
-
         await RunScenarioAsync(stoppingToken);
-
-        // Let the asynchronous subscription drain before shutting the host down.
-        await Task.Delay(TimeSpan.FromMilliseconds(200), stoppingToken);
-
-        var total = 0;
-        await foreach (var _ in allStream.ReadAllAsync(GlobalPosition.Start, ct: stoppingToken))
-            total++;
-        logger.LogInformation("Global stream holds {Count} events in total.", total);
-
+        await RebuildReadModelAsync(stoppingToken);
         lifetime.StopApplication();
     }
 
@@ -81,6 +73,22 @@ internal sealed class BankAccountWorker(
                 "Concurrency conflict as expected: expected v{Expected}, stream was at v{Actual}.",
                 ex.ExpectedVersion, ex.ActualVersion);
         }
+    }
+
+    private async Task RebuildReadModelAsync(CancellationToken ct)
+    {
+        var allStream = (IAllStreamReader)bankingStore;
+        var readModel = new AccountReadModel(loggerFactory.CreateLogger<AccountReadModel>());
+
+        var checkpoint = await checkpoints.GetAsync(ReadModelCheckpoint, ct) ?? GlobalPosition.Start;
+        var last = checkpoint;
+        await foreach (var stored in allStream.ReadAllAsync(checkpoint, ct: ct))
+        {
+            readModel.Apply(materializer.Materialize(stored));
+            last = stored.Position;
+        }
+
+        await checkpoints.SetAsync(ReadModelCheckpoint, last, ct);
     }
 
     private static async Task<BankAccount> Load(IAggregateRepository<BankAccount> repository, string id, CancellationToken ct) =>

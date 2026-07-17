@@ -2,8 +2,9 @@ namespace Dbosoft.EventStore;
 
 /// <summary>
 /// The core event store: append events to a stream under optimistic concurrency, and read a stream
-/// back. Every provider implements this. Optional features (global reads, subscriptions, snapshots,
-/// maintenance) are separate interfaces gated by <see cref="Capabilities"/>.
+/// back. Every provider implements this. Optional features (global reads, snapshots, maintenance)
+/// are separate interfaces gated by <see cref="Capabilities"/>. Live delivery is not the store's
+/// job — a message bus is presupposed; the store provides catch-up reads to feed and replay it.
 /// </summary>
 [PublicAPI]
 public interface IEventStore

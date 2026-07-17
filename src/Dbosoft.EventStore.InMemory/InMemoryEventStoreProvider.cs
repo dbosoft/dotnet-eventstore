@@ -5,8 +5,8 @@ namespace Dbosoft.EventStore.InMemory;
 
 /// <summary>
 /// Backs each domain with its own <see cref="InMemoryEventStore"/>, created on first access. Because
-/// the stores are independent instances, domains are fully isolated: separate streams, versions,
-/// global sequences and subscriptions.
+/// the stores are independent instances, domains are fully isolated: separate streams, versions and
+/// global sequences.
 /// </summary>
 [PublicAPI]
 public sealed class InMemoryEventStoreProvider : IEventStoreProvider

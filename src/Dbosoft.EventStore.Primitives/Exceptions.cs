@@ -53,6 +53,30 @@ public sealed class StreamNotFoundException : EventStoreException
     public string StreamId { get; }
 }
 
+/// <summary>
+/// Thrown when a stream has been truncated below the point from which it could be folded and no
+/// usable snapshot covers the gap, so the aggregate cannot be reconstructed. Rebuilding from a
+/// partial suffix would produce silently wrong state, so the load fails instead.
+/// </summary>
+[PublicAPI]
+public sealed class SnapshotRequiredException : EventStoreException
+{
+    /// <summary>Creates the exception for a stream truncated before the given version.</summary>
+    public SnapshotRequiredException(string streamId, long truncatedBefore)
+        : base($"Stream '{streamId}' is truncated before version {truncatedBefore} and no usable snapshot "
+               + $"at or after version {truncatedBefore - 1} exists; it cannot be reconstructed.")
+    {
+        StreamId = streamId;
+        TruncatedBefore = truncatedBefore;
+    }
+
+    /// <summary>The stream that cannot be reconstructed.</summary>
+    public string StreamId { get; }
+
+    /// <summary>The truncation boundary: events below this version are gone.</summary>
+    public long TruncatedBefore { get; }
+}
+
 /// <summary>Thrown when a stream has been deleted and can no longer be read or appended to.</summary>
 [PublicAPI]
 public sealed class StreamDeletedException : EventStoreException

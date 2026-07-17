@@ -30,7 +30,7 @@ public sealed class EventStoreBuilder
 
     /// <summary>
     /// Configures a domain — a group of related events mapped to its own storage unit, with its own
-    /// ordering and subscriptions.
+    /// ordering and global read.
     /// </summary>
     public EventStoreBuilder AddDomain(string name, Action<DomainBuilder> configure)
     {

@@ -6,17 +6,16 @@ namespace Dbosoft.EventStore.InMemory;
 /// A fully in-memory event store that implements every capability. It is the reference
 /// implementation the conformance suite runs against and the bar the persistent providers must
 /// clear; it is also handy for tests and samples. All writes are serialized, so its global sequence
-/// is dense and gap-free, which is why it can offer exact subscriptions.
+/// is dense and gap-free, which is why its catch-up reads are exact.
 /// </summary>
 [PublicAPI]
 public sealed class InMemoryEventStore
-    : IEventStore, IAllStreamReader, ITimeNavigable, ISubscriptionSource, IStreamMaintenance
+    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
     private readonly List<Entry> _all = [];
     private readonly Dictionary<string, List<StoredSnapshot>> _snapshots = new(StringComparer.Ordinal);
-    private readonly HashSet<InMemorySubscription> _subscriptions = [];
     private readonly TimeProvider _timeProvider;
     private long _sequence;
 
@@ -33,8 +32,7 @@ public sealed class InMemoryEventStore
     /// <inheritdoc />
     public StoreCapabilities Capabilities =>
         StoreCapabilities.AllStreamReads
-        | StoreCapabilities.Subscriptions
-        | StoreCapabilities.ExactSubscriptions
+        | StoreCapabilities.ExactCatchup
         | StoreCapabilities.MultiStreamAtomicAppend
         | StoreCapabilities.TimeNavigation
         | StoreCapabilities.Truncation
@@ -52,9 +50,6 @@ public sealed class InMemoryEventStore
         ArgumentNullException.ThrowIfNull(events);
         ct.ThrowIfCancellationRequested();
 
-        AppendResult result;
-        List<InMemorySubscription> toNotify;
-
         lock (_gate)
         {
             if (!_streams.TryGetValue(streamId, out var state))
@@ -66,17 +61,36 @@ public sealed class InMemoryEventStore
             if (state.HardDeleted)
                 throw new StreamDeletedException(streamId);
 
-            var newEvents = events.Where(e => !state.EventIds.Contains(e.EventId)).ToList();
-            if (newEvents.Count == 0)
+            var batchIds = new HashSet<Guid>();
+            foreach (var evt in events)
             {
-                // Every event has already been appended: an idempotent retry, so this is a no-op
-                // regardless of the expected version.
-                return Task.FromResult(new AppendResult(state.Version, LastPosition(state)));
+                if (!batchIds.Add(evt.EventId))
+                    throw new InvalidOperationException(
+                        $"The append to stream '{streamId}' contains EventId {evt.EventId} more than once.");
             }
+
+            // Idempotency is scoped to the whole batch: an exact replay of an already-stored batch is
+            // a no-op, a partial overlap is an error, and a fully new batch proceeds. Dedup only holds
+            // while the events are retained (truncation drops their ids).
+            var present = events.Count(evt => state.EventIds.Contains(evt.EventId));
+            if (present == events.Count && events.Count > 0)
+            {
+                var replayed = state.Events.Where(e => batchIds.Contains(e.EventId)).MaxBy(e => e.StreamVersion);
+                if (replayed is null)
+                    throw new InvalidOperationException($"Idempotency records for stream '{streamId}' are inconsistent.");
+
+                // Return the original append's outcome, not the current head.
+                return Task.FromResult(new AppendResult(replayed.StreamVersion, replayed.Position));
+            }
+
+            if (present > 0)
+                throw new InvalidOperationException(
+                    $"The append to stream '{streamId}' partially overlaps events already stored; an append "
+                    + "must be either entirely new or an exact replay of a prior batch.");
 
             EnsureExpectedVersion(streamId, expectedVersion, state.Version);
 
-            foreach (var evt in newEvents)
+            foreach (var evt in events)
             {
                 var entry = new Entry(
                     streamId,
@@ -96,14 +110,8 @@ public sealed class InMemoryEventStore
                 _all.Add(entry);
             }
 
-            result = new AppendResult(state.Version, LastPosition(state));
-            toNotify = [.. _subscriptions];
+            return Task.FromResult(new AppendResult(state.Version, LastPosition(state)));
         }
-
-        foreach (var subscription in toNotify)
-            subscription.Notify();
-
-        return Task.FromResult(result);
     }
 
     /// <inheritdoc />
@@ -192,22 +200,6 @@ public sealed class InMemoryEventStore
     }
 
     /// <inheritdoc />
-    public IAsyncDisposable SubscribeToAll(
-        GlobalPosition checkpoint,
-        IEventHandler handler,
-        SubscriptionOptions? options = null)
-    {
-        ArgumentNullException.ThrowIfNull(handler);
-
-        var subscription = new InMemorySubscription(this, checkpoint, handler, options ?? new SubscriptionOptions());
-        lock (_gate)
-            _subscriptions.Add(subscription);
-
-        subscription.Start();
-        return subscription;
-    }
-
-    /// <inheritdoc />
     public Task TruncateStreamAsync(
         string streamId,
         long beforeVersion,
@@ -228,6 +220,11 @@ public sealed class InMemoryEventStore
             if (beforeVersion <= state.TruncatedBefore)
                 return Task.CompletedTask;
 
+            // Drop the truncated events and their idempotency records: dedup only holds while events
+            // are retained, so a re-append of a truncated batch is treated as new (matching a provider
+            // whose unique (stream, id) index rows are physically removed by truncation).
+            foreach (var removed in state.Events.Where(e => e.StreamVersion < beforeVersion))
+                state.EventIds.Remove(removed.EventId);
             state.Events.RemoveAll(e => e.StreamVersion < beforeVersion);
             _all.RemoveAll(e => e.StreamId == streamId && e.StreamVersion < beforeVersion);
             state.TruncatedBefore = beforeVersion;
@@ -340,12 +337,6 @@ public sealed class InMemoryEventStore
 
             list.RemoveRange(0, list.Count - keep);
         }
-    }
-
-    internal void RemoveSubscription(InMemorySubscription subscription)
-    {
-        lock (_gate)
-            _subscriptions.Remove(subscription);
     }
 
     private sealed record Entry(

@@ -19,6 +19,13 @@ public sealed class DomainBuilder
     {
         Name = name;
         Services = services;
+
+        // A per-domain materializer (keyed by domain), for read models and bus bridges. The captured
+        // registry/upcasters are fully populated by the time it is first resolved.
+        services.AddKeyedSingleton<IEventMaterializer>(name, (sp, _) => new EventMaterializer(
+            _registry,
+            sp.GetRequiredService<IEventSerializer>(),
+            new UpcasterChain(_upcasters.Select(create => create(sp)))));
     }
 
     /// <summary>The domain's name.</summary>
@@ -80,20 +87,16 @@ public sealed class DomainBuilder
         where T : AggregateBase
     {
         var domain = Name;
-        var registry = _registry;
-        var upcasterFactories = _upcasters;
 
         Services.AddScoped<IAggregateRepository<T>>(sp =>
         {
             var provider = sp.GetRequiredService<IEventStoreProvider>();
-            var upcasters = new UpcasterChain(upcasterFactories.Select(create => create(sp)));
             var snapshots = snapshotPolicy is not null ? provider.GetSnapshotStore(domain) : null;
 
             return new AggregateRepository<T>(
                 provider.GetStore(domain),
+                sp.GetRequiredKeyedService<IEventMaterializer>(domain),
                 sp.GetRequiredService<IEventSerializer>(),
-                registry,
-                upcasters,
                 category,
                 factory,
                 snapshots,

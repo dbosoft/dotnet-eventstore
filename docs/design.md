@@ -9,12 +9,17 @@ A publicly usable NuGet library for event sourcing that is deliberately **not a 
 concept is theoretically simple and conceptually clear, and that clarity is the whole point
 compared to the existing .NET stores. No foreign frameworks in the core.
 
-**In scope:** streams, optimistic concurrency, snapshots, `$all`, catch-up subscriptions,
-truncation/retention/deletion, serialization + upcasting, an aggregate repository, and multiple
-storage providers (EF Core, Azure Table Storage).
+**In scope:** streams, optimistic concurrency, snapshots, `$all` catch-up reads,
+truncation/retention/deletion, serialization + upcasting, an aggregate repository, a per-domain
+event materializer, a checkpoint store, and multiple storage providers (EF Core, Azure Table
+Storage).
 
-**Out of scope:** projection host, command dispatch, read model runner, CQRS framework. We ship
-the store and the building blocks, not the application around them.
+**Out of scope — and one line matters most: we do not build a message bus, we presuppose one.**
+Live delivery, fan-out, retries, dead-lettering and subscriptions are the bus's job (Rebus in our
+world), never the store's. The store is the durable write side plus a *catch-up read* (`$all`) to
+feed and replay onto the bus. Also out: projection host, command dispatch, read-model runner, CQRS
+framework. We ship the store and the building blocks, not the application around them, and not the
+transport.
 
 **Target framework:** `net10.0`, single target.
 
@@ -35,7 +40,7 @@ Rejected, with reasons:
 | `GetSnapshotsByTypeAsync`, `ResourceSnapshotEntry.ResourceType`, `SapRoleSnapshotEntry.SystemId/Client` | The snapshot table is being used as a read model. Plus `ResourceTypeFromStreamId` with `IndexOf('-')` — an undocumented string contract. Domain knowledge that does not belong in a general library. |
 | `ReadStreamAsync` without paging | Always materializes the entire stream. |
 | Payload as `string` | Forces JSON and collides with ATS limits (64 KB per string property, 1 MB per entity). |
-| No EventId | Rebus retries append duplicates. |
+| No EventId | Rebus retries append duplicates. Fixed with an `EventId` assigned **at `Raise`** (stable across save retries, so a retried save is an idempotent no-op, not a duplicate), and **batch-scoped** idempotency: an exact replay of a stored batch succeeds returning the original outcome, a partial overlap is an error, in-batch duplicates are an error. Dedup holds only while the events are retained (truncation drops the record). |
 | `DateTime.UtcNow` inline | Not testable; `TimeProvider` is the standard. |
 | One snapshot per stream (upsert) | No history, no "snapshot at version N". |
 
@@ -51,7 +56,7 @@ per-context performance.
 
 **The consequence that shapes everything else:** with separate storage per domain there is **no
 ordering across domains**. Each domain is an independent ordered log — its own version and
-`GlobalPosition` sequence, its own `$all`, its own subscriptions. A single cross-domain total order
+`GlobalPosition` sequence, its own `$all` catch-up read. A single cross-domain total order
 would need one shared physical store (defeating the partitioning) or a merge layer with the very
 sequencing problem D2 describes. Order within a context is what applications actually need; order
 across unrelated contexts is not.
@@ -115,16 +120,27 @@ Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationT
 ATS answers it for free — the ticks *are* the key. EF Core answers it via an index on `CreatedAt`
 that is only created when the feature is switched on.
 
-### D3 — Subscriptions are eventually complete; how eventually differs by provider
+### D3 — Catch-up reads, not subscriptions; delivery is the bus's job
 
-This is not an ATS-only problem. On SQL an identity value is assigned at `INSERT` but only becomes
-visible at `COMMIT`, so a subscriber polling `WHERE Position > checkpoint` skips events that were
-assigned an earlier position and committed later. Both providers need a **watermark** — never read
-up to a point somebody could still write below — plus **dedupe by EventId**. The mechanism differs:
+The store does **not** deliver events. It offers a *catch-up read* of `$all`
+(`IAllStreamReader.ReadAllAsync` from a position), and that is what a read-model rebuild or a
+bus relay uses. There is no `ISubscriptionSource`, no in-process handler contract, no live push —
+those belong to the presupposed bus. Consumers own their position via `ICheckpointStore` and
+de-duplicate by `EventId`; delivery to consumers is therefore at-least-once, and exactly-once
+effects come from persisting the checkpoint transactionally with the read model.
 
-**EF Core: gap detection over the dense sequence.** The subscriber sees 1, 2, 3, 5 and *knows*
-that 4 is either still open or aborted. It waits, and after `GapTimeout` it moves on. The
-watermark is the highest position below which no holes remain.
+What remains a real, provider-dependent property is whether a *catch-up read* is **complete** — the
+capability `ExactCatchup`. It is not an ATS-only problem. On SQL an identity value is assigned at
+`INSERT` but only becomes visible at `COMMIT`, so a reader taking `WHERE Position > checkpoint` and
+advancing to the max position can skip an event that was assigned an earlier position and commits
+later. The reader needs a **watermark** — never advance past a point somebody could still write
+below. The mechanism differs by provider:
+
+**EF Core: gap detection over the dense sequence.** The reader sees 1, 2, 3, 5 and *knows*
+that 4 is either still open or aborted. It waits, and after a gap timeout it moves on. The
+watermark is the highest position below which no *transient* holes remain — historical holes from
+aborted transactions or scavenged (§7) positions are below a settled horizon and are skipped
+without waiting, so a rebuild over a long, scavenged log does not stall.
 
 This works with plain table reads and **no elevated permissions** — which is why we do *not* use
 the "oldest open transaction" approach (`sys.dm_tran_active_transactions`,
@@ -135,7 +151,7 @@ public library. Prior art for gap detection: SqlStreamStore, Marten.
 A non-dense sequence cannot support this at all: you can never distinguish "something is missing"
 from "nothing was ever there". This is the decisive argument for the dense sequence on SQL.
 
-**ATS: a safety window plus dedupe.** No dense sequence is available (§6), so the subscriber only
+**ATS: a safety window plus dedupe.** No dense sequence is available (§6), so the reader only
 reads up to `now - safetyWindow`.
 
 The window is **not** sized for clock drift. NTP-synced servers sit in the low single-digit
@@ -149,7 +165,12 @@ backoff turns Δ into a second while the clock is perfect.
 cascade. The tick then means "when the index entry landed", not "when the event was appended" —
 which is correct, because `$all` order is defined by the index, not by the stream.
 
-⇒ EF Core declares `ExactSubscriptions`; ATS does not.
+One honesty caveat on the flag: gap detection abandons a hole after a bounded timeout, so
+`ExactCatchup` holds *provided no append transaction outlives that timeout*. The provider either
+bounds append duration below it or documents the condition — a silently conditional guarantee is
+exactly what D1's capability honesty exists to prevent.
+
+⇒ EF Core declares `ExactCatchup`; ATS does not.
 
 ### D4 — The core only knows bytes
 
@@ -191,10 +212,23 @@ chain (as events are) but by two properties:
   changes to the snapshot state just work.
 - **Best-effort load** — if a snapshot still fails to deserialize (a breaking change, or
   corruption), the repository discards it and rebuilds from the event stream instead of failing the
-  load. A snapshot can never break reading.
+  load. A snapshot can never break reading — **except past a truncation boundary** (below).
 
-This is also why truncation (§7) requires a covering snapshot: the snapshot is what lets old events
-be dropped while the state stays reconstructable.
+**The one place best-effort is wrong: after truncation.** Truncation (§7) drops the events below a
+boundary, so for that prefix the covering snapshot stops being disposable derived data and *becomes
+the source of truth*. If it is then unusable (a breaking schema change, corruption), replaying the
+surviving suffix from an empty state would fold a silently wrong aggregate. So `LoadAsync` consults
+`StreamInfo.TruncatedBefore` and **fails loudly** with `SnapshotRequiredException` when it cannot
+obtain a usable snapshot at or after the boundary, rather than returning corrupt state. Truncation
+requiring a covering snapshot (§7) protects the *write* side of this; the load-time check protects
+the *read* side.
+
+**Known follow-up — a snapshot epoch.** A new or changed upcaster changes fold semantics, so a
+pre-existing snapshot embeds a stale fold; tolerant deserialization does not catch *semantic*
+staleness, so it would be served silently. The conventional fix is a snapshot epoch/version stamp
+that, when bumped, invalidates all snapshots (they rebuild from events). Harmless while the events
+below the snapshot still exist; combined with truncation it is permanent. Not yet implemented —
+tracked as the next snapshot-layer decision.
 
 ### D6 — Caller-owned transactions are a future unit-of-work context, not a commit-mode flag
 
@@ -263,16 +297,13 @@ public enum StoreCapabilities
     /// <summary>Events across all streams can be read in a single ordered sequence.</summary>
     AllStreamReads = 1 << 0,
 
-    /// <summary>Subscriptions can follow that sequence from a checkpoint.</summary>
-    Subscriptions = 1 << 1,
-
     /// <summary>
-    /// A subscription never silently skips an event: once it reports a position, every event
-    /// ordered below that position has been delivered. Without this flag a subscription is
-    /// complete only eventually, and handlers must tolerate redelivery and reordering within
-    /// the store's safety window.
+    /// A catch-up read of that sequence is complete: reading forward from a position never silently
+    /// skips an event that commits below the point already returned. Without this flag a catch-up is
+    /// complete only up to a bounded staleness window, so the reader must re-read and de-dupe by
+    /// EventId. (There is no subscription capability — delivery is the bus's job, D3.)
     /// </summary>
-    ExactSubscriptions = 1 << 2,
+    ExactCatchup = 1 << 2,
 
     /// <summary>Events for several streams can be appended in one atomic operation.</summary>
     MultiStreamAtomicAppend = 1 << 3,
@@ -329,10 +360,20 @@ public interface ITimeNavigable
     Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default);
 }
 
-public interface ISubscriptionSource
+// Catch-up reads feed a read-model rebuild or a bus relay; a checkpoint remembers how far.
+public interface ICheckpointStore
 {
-    IAsyncDisposable SubscribeToAll(GlobalPosition checkpoint, IEventHandler handler,
-        SubscriptionOptions? options = null);
+    Task<GlobalPosition?> GetAsync(string name, CancellationToken ct = default);
+    Task SetAsync(string name, GlobalPosition position, CancellationToken ct = default);
+}
+
+// The read-side / bus-bridge primitive: map a domain's events between bytes and typed objects,
+// both directions. Resolved from DI keyed by domain. The store hands this out; it never delivers.
+public interface IEventMaterializer
+{
+    object Materialize(StoredEvent stored);                                   // deserialize + upcast
+    bool TryMaterialize(StoredEvent stored, out object? @event);              // false for unknown types
+    EventData Dematerialize(object @event, Guid? eventId = null, ReadOnlyMemory<byte>? metadata = null);
 }
 
 public interface ISnapshotStore
@@ -351,8 +392,8 @@ public interface IStreamMaintenance
 }
 ```
 
-`SubscriptionOptions` carries whatever knob the provider needs to bound its watermark; the
-provider documents which one it honours.
+A catch-up reader supplies whatever knob the provider needs to bound its watermark (gap timeout on
+SQL, safety window on ATS); the provider documents which one it honours.
 
 `WrongExpectedVersionException` carries `StreamId`, `ExpectedVersion` and **`ActualVersion`** — the
 last one is missing in SAPId and is what retry logic needs.
@@ -383,7 +424,7 @@ the ATS `HEAD` entity (§6): one concept, two providers.
 caller-owned transaction is the future unit-of-work context (D6), not part of the first cut.
 
 **`$all`:** `WHERE Position > @p ORDER BY Position` on the PK index, with gap detection per D3.
-Declares `ExactSubscriptions`.
+Declares `ExactCatchup`.
 
 Tested against SQLite, SQL Server and PostgreSQL (Testcontainers).
 
@@ -402,12 +443,12 @@ so the newest snapshot is the first row.
 
 **`$all` via the log tail pattern:**
 
-- **Forward** ticks in the RowKey, not reverse: ATS only sorts ascending, and a catch-up subscriber
+- **Forward** ticks in the RowKey, not reverse: ATS only sorts ascending, and a catch-up reader
   wants oldest-first from a checkpoint. Reverse ticks (`MaxValue.Ticks - now`) stay for "the N most
   recent" / tailing the head.
 - **Stamp the tick late and re-stamp on retry**, to keep Δ small (D3).
 - **Sharded buckets, not a single `$all` key.** PartitionKey combines a time bucket with a shard
-  (e.g. `"2026-07-17T14/03"`); the subscriber merges N tick-ordered buckets on read. The MS docs
+  (e.g. `"2026-07-17T14/03"`); the reader merges N tick-ordered buckets on read. The MS docs
   warn explicitly about the log tail pattern: *"be careful not to create hot spot partitions"*.
   Cost is a merge loop in the reader.
 - **Atomicity:** the index entry necessarily lives in a different partition than the event, so no
@@ -425,10 +466,10 @@ so the newest snapshot is the first row.
 | Sequencer entity (a real dense sequence) | Every append in the whole store funnels through one counter entity in one partition; ETag conflicts under concurrency produce retry loops that collapse throughput well below the partition ceiling. Burned numbers would *not* be the problem — they are the exact analogue of an aborted transaction on SQL, which gap detection clears via timeout. The contention is. |
 | Hi/Lo number blocks | Fixes the contention, destroys the property it exists for: writer A holds 1–100, B holds 101–200, B writes 101 before A writes 1 — dense but no longer commit-ordered, and gap detection stalls on numbers nobody has written yet. |
 | Queue / Event Hubs as the ordering channel | Pulls in an external service dependency we explicitly do not want, and only solves the *live* case — a historical `ReadAllAsync(from: T)` still needs the table index, so you end up with both. |
-| No `$all` on ATS at all | The honest fallback: per-stream subscriptions only. Costs cross-stream read models on ATS entirely. Kept in reserve if the index proves unworkable. |
+| No `$all` on ATS at all | The honest fallback: per-stream reads only. Costs cross-stream read models on ATS entirely. Kept in reserve if the index proves unworkable. |
 
-⇒ ATS declares `AllStreamReads | Subscriptions | TimeNavigation`, but **not**
-`MultiStreamAtomicAppend` and **not** `ExactSubscriptions`.
+⇒ ATS declares `AllStreamReads | TimeNavigation`, but **not**
+`MultiStreamAtomicAppend` and **not** `ExactCatchup`.
 
 **Payloads over 64 KB:** chunked across several properties (`Data0..DataN`) up to the 1 MB entity
 limit. Beyond that, v1 throws a clear exception; blob overflow is an optional later addition.
@@ -449,15 +490,21 @@ nothing is renumbered, the versions below the boundary simply no longer exist.
 reconstructed. This is exactly the "cut off behind snapshots" case. `force: true` overrides it
 deliberately and loudly.
 
-**Delete-stream:** `DeleteMode.Soft` (tombstone, the stream can be recreated) or `DeleteMode.Hard`
-(data gone, the StreamId permanently burned). This covers "forget a history": one stream per
-subject, hard delete, done.
+**Delete-stream:** `DeleteMode.Soft` (the events go, the StreamId may be reused) or `DeleteMode.Hard`
+(data gone, the StreamId permanently burned). Note this is "id reusable vs id burned", not the
+soft/hard-tombstone of some other stores — both physically remove the events.
 
-**Retention policies** in the stream metadata: `MaxCount`, `MaxAge`. The scavenger applies them.
+**Retention policies** in the stream metadata: `MaxCount`, `MaxAge`. The scavenger applies them —
+e.g. an access log that keeps only a recent window and deletes older entries by timestamp.
 
-**Not in v1:** redacting individual events in the middle of a stream. Truncation (a prefix) and
-deletion (the whole thing) both preserve the shape; a hole in the middle does not. Can be added
-later if a real need shows up.
+**Deletion and retention are about space and forgetting *old* history — not GDPR erasure.** Erasing
+a subject's personal data is a different problem with a different mechanism: **overwriting the PII**
+in the affected event payloads (redaction), not deleting a stream. Deletion also does not propagate:
+`$all` shows no tombstone, so a read model that already projected the data keeps it — purging
+downstream copies is the application's (bus consumers') job. Redaction of individual event payloads
+is **not in v1** (it breaks the shape-preserving property that truncation and whole-stream deletion
+keep) — it is a separate, explicitly-scoped capability if a real need arises. The library will not
+pretend "delete a stream" is a GDPR answer.
 
 ## 8. Testing — the heart of the agnosticism
 
@@ -469,11 +516,38 @@ can validate their implementation too.
 Stack: **xunit**, **AwesomeAssertions**, **NSubstitute**.
 
 Beyond conformance: concurrency stress tests with parallel appends (exactly what the SAPId store
-fails at), subscription tests with artificial commit reordering, and `TimeProvider`-driven
-retention tests.
+fails at), batch-idempotency tests (exact replay / partial overlap / in-batch duplicates), catch-up
+completeness tests with artificial commit reordering, and `TimeProvider`-driven retention tests.
 
 The conformance suite is built **together with the abstractions**, not after them: it *is* the
 contract.
+
+## 8a. Bus integration — designed for, not built
+
+We presuppose a message bus (Rebus). The store provides the primitives a bus bridge needs and
+nothing more:
+
+- **Catch-up read** (`IAllStreamReader.ReadAllAsync` from a position) — replay/rebuild, and the
+  source a relay tails.
+- **`IEventMaterializer`** (per domain, keyed) — maps events between stored bytes and typed objects
+  **both directions**, so the bridge can turn a stored event into a bus message and an incoming bus
+  message into an append. This is the one pipeline read models and the bridge share; it is no longer
+  locked inside the aggregate repository.
+- **`ICheckpointStore`** — a relay or a read-model rebuild remembers how far it read.
+
+Two positions the design names and leaves to the application:
+
+- **Relay-only (replay).** Live events are published to the bus directly by the producing handler;
+  the store→bus relay exists only to replay history for rebuilds. Simplest, but the direct publish
+  is a dual-write (append + publish as two steps) that a crash can split.
+- **Outbox (single publisher).** The relay is the *only* publisher: append to the store, the relay
+  forwards every new event to the bus. No dual-write; live and replay use one path.
+
+The **inbound** side is not a special primitive — a bus handler uses the normal append API, with the
+materializer mapping the message to an event. The bus adapter itself is a **separate optional
+package**; a **demo in-memory bus** ships as the reference adapter (as InMemory is the reference
+provider — proves the seam, no external dependency), with a real `Dbosoft.EventStore.Rebus` package
+later.
 
 ## 9. Package layout
 
@@ -491,11 +565,13 @@ ships no DI sugar could reference Abstractions alone.
 |---|---|---|
 | `Dbosoft.EventStore.Primitives` | value types, records, enums, exceptions, capabilities | none |
 | `Dbosoft.EventStore.Abstractions` | interfaces | Primitives |
-| `Dbosoft.EventStore` | serializer, event type registry, upcasting, aggregate repository, snapshot policy, DI | Abstractions |
+| `Dbosoft.EventStore` | serializer, type registry, upcasting, materializer, aggregate repository, snapshot policy, DI | Abstractions |
 | `Dbosoft.EventStore.EfCore` | EF Core provider | Core, EFCore.Relational |
 | `Dbosoft.EventStore.AzureTables` | ATS provider | Core, Azure.Data.Tables |
 | `Dbosoft.EventStore.InMemory` | reference / test implementation | Core |
 | `Dbosoft.EventStore.Testing` | conformance suite | Abstractions, xunit, AwesomeAssertions |
+| `Dbosoft.EventStore.Bus.Demo` (planned) | reference in-memory bus + store↔bus bridge | Core |
+| `Dbosoft.EventStore.Rebus` (later) | Rebus adapter | Core, Rebus |
 
 ## 10. Phased plan
 
@@ -505,10 +581,11 @@ ships no DI sugar could reference Abstractions alone.
    PostgreSQL + SQL Server.
 3. **Core layer** — serializer, type registry, upcasting, aggregate repository, snapshot policy.
 4. **Truncation / retention / scavenge / delete**, including the snapshot invariant from §7.
-5. **`$all` + catch-up subscriptions** — gap detection on SQL, the exact-vs-bounded split from D3.
+5. **`$all` catch-up reads + materializer/checkpoint + demo bus bridge** — gap detection on SQL,
+   the exact-vs-bounded split from D3, and the reference in-memory bus proving the relay/inbound seam.
 6. **Azure Table Storage provider** — EGT append, sharded log-tail `$all`, chunking. Against
-   Azurite. Deliberately after phase 5: only once the subscription contract stands does it show
-   whether the opaque token holds up.
+   Azurite. Deliberately after phase 5: only once the catch-up contract stands does it show whether
+   the opaque token holds up.
 7. **Docs, sample, NuGet, CI.**
 8. **Migrate SAPId.** The actual proof: if the four SAPId aggregates run on the library without
    marker classes and without `DeferCommit`, the design is right.

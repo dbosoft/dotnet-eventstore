@@ -15,6 +15,7 @@ public static class InMemoryEventStoreBuilderExtensions
     {
         builder.Services.TryAddSingleton(TimeProvider.System);
         builder.Services.TryAddSingleton<IEventStoreProvider, InMemoryEventStoreProvider>();
+        builder.Services.TryAddSingleton<ICheckpointStore, InMemoryCheckpointStore>();
         return builder;
     }
 }

@@ -3,8 +3,8 @@ namespace Dbosoft.EventStore;
 /// <summary>
 /// Gives access to a store per domain. A domain is an independent, ordered log mapped to its own
 /// storage unit (a table, a partition, an in-memory area). There is deliberately no ordering across
-/// domains: each has its own version and <see cref="GlobalPosition"/> sequence, its own global read
-/// and its own subscriptions. Group events that belong together into one domain.
+/// domains: each has its own version and <see cref="GlobalPosition"/> sequence and its own global
+/// read. Group events that belong together into one domain.
 /// </summary>
 [PublicAPI]
 public interface IEventStoreProvider
