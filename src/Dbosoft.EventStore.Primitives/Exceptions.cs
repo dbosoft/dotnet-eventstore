@@ -71,7 +71,7 @@ public sealed class StreamDeletedException : EventStoreException
 /// <summary>
 /// Thrown when a requested operation is not supported by the provider — for example an optional
 /// interface method whose backing <see cref="StoreCapabilities"/> flag is not declared, or a
-/// truncation that would leave the stream unreconstructable and was not forced.
+/// truncation that would leave the stream impossible to reconstruct and was not forced.
 /// </summary>
 [PublicAPI]
 public sealed class NotSupportedByProviderException : EventStoreException

@@ -11,7 +11,7 @@ public interface IStreamMaintenance
     /// <summary>
     /// Physically removes events with version below <paramref name="beforeVersion"/>. Version numbers
     /// are not renumbered — the versions below the boundary simply cease to exist. Refused unless a
-    /// snapshot at or after <c>beforeVersion - 1</c> exists (so the state stays reconstructable),
+    /// snapshot at or after <c>beforeVersion - 1</c> exists (so the state can still be reconstructed),
     /// unless <paramref name="force"/> is set.
     /// </summary>
     /// <exception cref="NotSupportedByProviderException">

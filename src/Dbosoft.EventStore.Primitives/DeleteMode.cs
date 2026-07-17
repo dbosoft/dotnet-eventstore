@@ -12,5 +12,5 @@ public enum DeleteMode
     /// <summary>
     /// Remove the stream and burn its id permanently; a later append to the same id is rejected.
     /// </summary>
-    Hard = 1,
+    Hard = 1
 }

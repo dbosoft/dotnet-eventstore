@@ -42,5 +42,5 @@ public enum StoreCapabilities
     StreamDeletion = 1 << 7,
 
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
-    SnapshotHistory = 1 << 8,
+    SnapshotHistory = 1 << 8
 }

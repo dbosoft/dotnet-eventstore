@@ -8,5 +8,5 @@ public enum ReadDirection
     Forwards = 0,
 
     /// <summary>From higher versions/positions to lower ones.</summary>
-    Backwards = 1,
+    Backwards = 1
 }

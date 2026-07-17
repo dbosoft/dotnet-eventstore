@@ -223,7 +223,7 @@ public sealed class InMemoryEventStore
             if (!force && LatestSnapshotVersion(streamId) < beforeVersion - 1)
                 throw new NotSupportedByProviderException(
                     $"Truncating stream '{streamId}' before version {beforeVersion} would leave it "
-                    + "unreconstructable: no snapshot at or after that boundary exists. Pass force to override.");
+                    + "impossible to reconstruct: no snapshot at or after that boundary exists. Pass force to override.");
 
             if (beforeVersion <= state.TruncatedBefore)
                 return Task.CompletedTask;
