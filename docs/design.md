@@ -493,9 +493,28 @@ the read-side counterpart); `force: true` overrides loudly. Emits `$stream-trunc
 StreamId burned) — "id reusable vs id burned", not the soft/hard-tombstone of some other stores;
 both physically remove the events. Emits `$stream-deleted`.
 
-**Retention policies** in stream metadata: `MaxCount`, `MaxAge`. The scavenger applies them — e.g. an
-access log that keeps only a recent window and deletes older entries by timestamp, each removal
-propagating as a marker so the read side prunes in step.
+**Retention — by time *and* by attribute, searching over event metadata (later, but the model is
+fixed now).** The target is: "delete all entries older than 30 days", and "delete only entries older
+than 30 days of category A". Two consequences that must be baked in before the stores:
+
+- **The searchable home is `EventData.Metadata`, not a new typed field.** Category, tenant, and also
+  correlation/causation ids are metadata (structured, e.g. JSON). Retention predicates match on
+  metadata plus `CreatedAt` (time is free — every event has it). We deliberately do **not** add an
+  `Attributes` property to the event; the providers make metadata *queryable* (EF Core: a JSON column
+  with indexed paths; ATS: entity properties; InMemory: parse and match), so "category A" is a
+  metadata search, not a schema change.
+- **Attribute-filtered retention deletes selectively — it punches holes.** Removing "category A older
+  than 30 days" can drop event #5 while keeping #3 and #7. That is *not* prefix truncation, so it is
+  **only valid for non-folded (log) domains** — a hole breaks an aggregate's fold. This is the same
+  domain seam as everywhere: logs tolerate holes, aggregates do not. Each removal propagates as a
+  marker so read models prune in step.
+
+The retention *engine* (evaluate policy, delete matching, emit markers) is built with the stores,
+where a metadata predicate can be translated to SQL/ATS efficiently. What is fixed now: metadata is
+the queryable attribute home, and selective retention is a non-folded-domain capability.
+
+Simple prefix/count retention (`MaxCount`, keep-last-N) remains available for the shape-preserving
+case; the attribute+time search is the general form above.
 
 **Redaction — the GDPR-erasure mechanism, and it *is* in scope** (`RedactEventAsync`, capability
 `Redaction`, emits `$event-redacted`). Erasing a subject's PII is **not** deleting a stream; it is
