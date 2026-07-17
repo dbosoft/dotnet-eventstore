@@ -1,31 +1,31 @@
+using Dbosoft.EventStore.InMemory;
 using Microsoft.Extensions.Logging;
 
 namespace Dbosoft.EventStore.Sample.BankAccount;
 
 /// <summary>
-/// A read model rebuilt by replaying the domain's events. It folds *typed* events — the materializer
-/// turned the stored bytes back into <see cref="AccountOpened"/> / <see cref="Deposited"/> /
-/// <see cref="Withdrawn"/> — which is exactly what a projection or a bus handler consumes.
+/// A read model fed from the bus. It folds *typed* payloads — the relay materialized the stored
+/// bytes back into <see cref="AccountOpened"/> / <see cref="Deposited"/> / <see cref="Withdrawn"/>.
 /// </summary>
 internal sealed class AccountReadModel(ILogger<AccountReadModel> logger)
 {
-    private decimal _balance;
+    public decimal Balance { get; private set; }
 
-    public void Apply(object @event)
+    public Task Handle(BusMessage message, CancellationToken ct = default)
     {
-        switch (@event)
+        switch (message.Payload)
         {
             case AccountOpened opened:
                 logger.LogInformation("read model: account opened by {Owner}", opened.Owner);
                 break;
             case Deposited deposited:
-                _balance += deposited.Amount;
-                logger.LogInformation("read model: +{Amount:C} → balance {Balance:C}", deposited.Amount, _balance);
+                Balance += deposited.Amount;
                 break;
             case Withdrawn withdrawn:
-                _balance -= withdrawn.Amount;
-                logger.LogInformation("read model: -{Amount:C} → balance {Balance:C}", withdrawn.Amount, _balance);
+                Balance -= withdrawn.Amount;
                 break;
         }
+
+        return Task.CompletedTask;
     }
 }
