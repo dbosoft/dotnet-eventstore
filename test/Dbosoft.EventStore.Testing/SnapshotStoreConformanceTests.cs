@@ -13,7 +13,7 @@ public abstract class SnapshotStoreConformanceTests
     [Fact]
     public async Task Save_and_load_latest_round_trips()
     {
-        (ISnapshotStore snapshots, _) = CreateSnapshotStore();
+        var (snapshots, _) = CreateSnapshotStore();
 
         await snapshots.SaveAsync("s1", 5, Event("Snap", "{\"v\":5}").Data);
         var loaded = await snapshots.LoadLatestAsync("s1");
@@ -25,14 +25,14 @@ public abstract class SnapshotStoreConformanceTests
     [Fact]
     public async Task Load_latest_is_null_when_absent()
     {
-        (ISnapshotStore snapshots, _) = CreateSnapshotStore();
+        var (snapshots, _) = CreateSnapshotStore();
         (await snapshots.LoadLatestAsync("missing")).Should().BeNull();
     }
 
     [Fact]
     public async Task Load_at_or_before_returns_the_newest_within_bound()
     {
-        (ISnapshotStore snapshots, StoreCapabilities capabilities) = CreateSnapshotStore();
+        var (snapshots, capabilities) = CreateSnapshotStore();
         if (!capabilities.HasFlag(StoreCapabilities.SnapshotHistory))
             return;
 
@@ -48,7 +48,7 @@ public abstract class SnapshotStoreConformanceTests
     [Fact]
     public async Task Prune_keeps_only_the_newest_snapshots()
     {
-        (ISnapshotStore snapshots, StoreCapabilities capabilities) = CreateSnapshotStore();
+        var (snapshots, capabilities) = CreateSnapshotStore();
         if (!capabilities.HasFlag(StoreCapabilities.SnapshotHistory))
             return;
 

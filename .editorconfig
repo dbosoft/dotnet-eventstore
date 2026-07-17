@@ -15,6 +15,11 @@ csharp_style_var_when_type_is_apparent = true:suggestion
 csharp_style_expression_bodied_members = true:suggestion
 dotnet_style_prefer_conditional_expression_over_return = false:none
 
+# Style suggestions we deliberately don't adopt team-wide:
+# keep `var` in deconstructions, and keep classic extension methods (not C# 14 extension blocks).
+resharper_suggest_var_or_type_deconstruction_declarations_highlighting = none
+resharper_convert_to_extension_block_highlighting = none
+
 [*.{csproj,props,targets}]
 indent_size = 2
 
