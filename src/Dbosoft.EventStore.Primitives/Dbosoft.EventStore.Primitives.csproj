@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dbosoft.EventStore</RootNamespace>
+    <Description>Value types, records and exceptions for the Dbosoft event store contract.</Description>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Dbosoft.EventStore.Sample.BankAccount/Dbosoft.EventStore.Sample.BankAccount.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Dbosoft.EventStore.Abstractions/Dbosoft.EventStore.Abstractions.csproj" />
+    <Project Path="src/Dbosoft.EventStore.InMemory/Dbosoft.EventStore.InMemory.csproj" />
+    <Project Path="src/Dbosoft.EventStore.Primitives/Dbosoft.EventStore.Primitives.csproj" />
+    <Project Path="src/Dbosoft.EventStore/Dbosoft.EventStore.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Dbosoft.EventStore.Testing/Dbosoft.EventStore.Testing.csproj" />
+    <Project Path="test/Dbosoft.EventStore.Tests/Dbosoft.EventStore.Tests.csproj" />
+  </Folder>
+</Solution>

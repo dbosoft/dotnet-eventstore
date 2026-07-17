@@ -431,9 +431,16 @@ contract.
 
 ## 9. Package layout
 
+The contract stack is layered `Primitives → Abstractions → Core`, all sharing the base namespace
+`Dbosoft.EventStore` (assembly name ≠ namespace, the standard MS library pattern). The dividing
+line: no interface in Primitives, no bare data type in Abstractions. Providers reference
+Abstractions and are single-package leaves — the three-way split applies to the contract stack,
+not to leaves that define nothing contract-worthy.
+
 | Package | Contents | Dependencies |
 |---|---|---|
-| `Dbosoft.EventStore.Abstractions` | interfaces, records, exceptions, capabilities | none |
+| `Dbosoft.EventStore.Primitives` | value types, records, enums, exceptions, capabilities | none |
+| `Dbosoft.EventStore.Abstractions` | interfaces | Primitives |
 | `Dbosoft.EventStore` | serializer, event type registry, upcasting, aggregate repository, snapshot policy, DI | Abstractions |
 | `Dbosoft.EventStore.EfCore` | EF Core provider | Abstractions, EFCore.Relational |
 | `Dbosoft.EventStore.AzureTables` | ATS provider | Abstractions, Azure.Data.Tables |

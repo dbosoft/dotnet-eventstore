@@ -1,0 +1,27 @@
+<Project>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Missing-doc (CS1591) stays a warning: the public surface is documented, but trivial
+         members (operators, obvious constructors, enum None) are not forced. Malformed or
+         dangling doc references (CS1574 etc.) remain errors. -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);CS1591</WarningsNotAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package metadata">
+    <Authors>dbosoft GmbH</Authors>
+    <Company>dbosoft GmbH</Company>
+    <Product>Dbosoft.EventStore</Product>
+    <PackageProjectUrl>https://github.com/dbosoft/eventstore</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/dbosoft/eventstore</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+</Project>

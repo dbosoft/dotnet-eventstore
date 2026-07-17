@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dbosoft.EventStore</RootNamespace>
+    <Description>Storage-agnostic interfaces for the Dbosoft event store.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Dbosoft.EventStore.Primitives\Dbosoft.EventStore.Primitives.csproj" />
+  </ItemGroup>
+
+</Project>
