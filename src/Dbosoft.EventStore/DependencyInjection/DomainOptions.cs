@@ -15,7 +15,7 @@ public sealed record DomainOptions
 
     /// <summary>
     /// How long <c>$system</c> tombstones are kept before a scavenge may remove them. Consumers must
-    /// catch up within this window or they miss the deletion notification. Default 7 days.
+    /// catch up within this window; otherwise they miss the deletion notification. Default 7 days.
     /// </summary>
     public TimeSpan TombstoneRetention { get; init; } = TimeSpan.FromDays(7);
 }

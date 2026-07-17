@@ -13,7 +13,7 @@ public sealed class EventMaterializer : IEventMaterializer
     {
         [SystemEventTypes.StreamTruncated] = typeof(StreamTruncatedMarker),
         [SystemEventTypes.StreamDeleted] = typeof(StreamDeletedMarker),
-        [SystemEventTypes.EventRedacted] = typeof(EventRedactedMarker),
+        [SystemEventTypes.EventRedacted] = typeof(EventRedactedMarker)
     };
 
     private static readonly JsonSerializerOptions SystemJson = new(JsonSerializerDefaults.Web);
@@ -33,10 +33,8 @@ public sealed class EventMaterializer : IEventMaterializer
     /// <inheritdoc />
     public object Materialize(StoredEvent stored)
     {
-        if (SystemTypes.TryGetValue(stored.EventType, out var systemType))
-            return DeserializeSystem(stored, systemType);
-
-        return _upcasters.Upcast(_serializer.Deserialize(_registry.Resolve(stored.EventType), stored.Data));
+        return SystemTypes.TryGetValue(stored.EventType, out var systemType) ? DeserializeSystem(stored, systemType)
+            : _upcasters.Upcast(_serializer.Deserialize(_registry.Resolve(stored.EventType), stored.Data));
     }
 
     /// <inheritdoc />

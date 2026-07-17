@@ -252,7 +252,7 @@ public abstract class EventStoreConformanceTests
         var first = await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, batch);
         var replay = await store.AppendToStreamAsync("s1", ExpectedVersion.Any, batch);
 
-        // The replay returns the original append's outcome, and nothing is written twice.
+        // The replay returns the outcome of the original append operation, and nothing is written twice.
         replay.NextExpectedVersion.Should().Be(first.NextExpectedVersion);
         (await store.ReadAllOf("s1")).Should().HaveCount(3);
     }

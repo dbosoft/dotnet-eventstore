@@ -85,11 +85,9 @@ public sealed class InMemoryEventStore
             if (present == events.Count && events.Count > 0)
             {
                 var replayed = state.Events.Where(e => batchIds.Contains(e.EventId)).MaxBy(e => e.StreamVersion);
-                if (replayed is null)
-                    throw new InvalidOperationException($"Idempotency records for stream '{streamId}' are inconsistent.");
-
-                // Return the original append's outcome, not the current head.
-                return Task.FromResult(new AppendResult(replayed.StreamVersion, replayed.Position));
+                return replayed is null ? throw new InvalidOperationException($"Idempotency records for stream '{streamId}' are inconsistent.") :
+                    // Return the outcome of the original append operation, not the current head.
+                    Task.FromResult(new AppendResult(replayed.StreamVersion, replayed.Position));
             }
 
             if (present > 0)
