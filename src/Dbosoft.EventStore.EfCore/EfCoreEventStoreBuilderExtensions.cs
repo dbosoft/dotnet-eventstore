@@ -11,7 +11,7 @@ public static class EfCoreEventStoreBuilderExtensions
     /// <summary>
     /// Backs the event store with EF Core. You steer the whole registration: <paramref name="configureDbContext"/>
     /// picks the database provider, connection and options, and the optional <paramref name="configureModel"/>
-    /// applies provider-specific model tweaks (concurrency token, converters — see <see cref="EventStoreModel"/>)
+    /// applies provider-specific model tweaks (concurrency token, converters — see <see cref="EventStoreModelBuilderExtensions"/>)
     /// that stay out of the provider-agnostic context. The context is never held globally — it is created per
     /// operation from an <see cref="IDbContextFactory{TContext}"/>, so the store is safe to share.
     /// </summary>

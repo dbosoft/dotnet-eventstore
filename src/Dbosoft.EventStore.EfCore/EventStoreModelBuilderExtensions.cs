@@ -8,7 +8,7 @@ namespace Dbosoft.EventStore.EfCore;
 /// The base model is provider-agnostic; pick the pieces a given database needs.
 /// </summary>
 [PublicAPI]
-public static class EventStoreModel
+public static class EventStoreModelBuilderExtensions
 {
     /// <summary>Provider-specific tweaks applied to the event store's <see cref="ModelBuilder"/>.</summary>
     extension(ModelBuilder modelBuilder)
