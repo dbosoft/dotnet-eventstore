@@ -329,8 +329,8 @@ internal sealed class EfCoreEventStore(
     {
         if (position == GlobalPosition.Start)
             return 0;
-        if (position == GlobalPosition.End)
-            return long.MaxValue;
-        return long.Parse(position.Token, CultureInfo.InvariantCulture);
+        return position == GlobalPosition.End
+            ? long.MaxValue
+            : long.Parse(position.Token, CultureInfo.InvariantCulture);
     }
 }
