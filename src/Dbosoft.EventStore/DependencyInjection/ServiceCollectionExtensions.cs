@@ -9,23 +9,26 @@ namespace Dbosoft.EventStore.DependencyInjection;
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers the serializer, event type registry and upcaster chain, and returns a builder for
-    /// choosing a provider, registering event types and adding aggregate repositories.
+    /// Registers the serializer and returns a builder for choosing a provider, declaring domains and
+    /// their event types, and adding aggregate repositories. Each declared domain is also exposed as a
+    /// keyed <see cref="IEventStore"/> (keyed by domain name) for direct injection.
     /// </summary>
     public static EventStoreBuilder AddEventStore(this IServiceCollection services, Action<EventStoreBuilder> configure)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configure);
 
-        var registry = new EventTypeRegistry();
-        var builder = new EventStoreBuilder(services, registry);
+        var builder = new EventStoreBuilder(services);
         configure(builder);
 
-        // Register defaults last, so anything the caller plugged in (e.g. UseSerializer) takes
-        // precedence — TryAdd only fills what is still missing.
-        services.TryAddSingleton<IEventTypeRegistry>(registry);
+        // Defaults registered after configure, so a caller's UseSerializer takes precedence.
         services.TryAddSingleton<IEventSerializer>(new SystemTextJsonEventSerializer());
-        services.TryAddSingleton(sp => new UpcasterChain(sp.GetServices<IEventUpcaster>()));
+
+        foreach (var domain in builder.Domains)
+        {
+            services.AddKeyedSingleton<IEventStore>(domain, (sp, key) =>
+                sp.GetRequiredService<IEventStoreProvider>().GetStore((string)key!));
+        }
 
         return builder;
     }

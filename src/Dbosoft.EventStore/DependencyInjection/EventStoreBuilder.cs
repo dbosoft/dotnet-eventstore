@@ -1,4 +1,6 @@
+using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Dbosoft.EventStore.Aggregates;
 using Dbosoft.EventStore.Serialization;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,26 +9,33 @@ namespace Dbosoft.EventStore.DependencyInjection;
 
 /// <summary>
 /// Fluent configuration for the event store, returned by <c>AddEventStore</c>. Providers extend this
-/// with <c>UseXxx</c> methods that register an <see cref="IEventStore"/> (and optional interfaces).
+/// with <c>UseXxx</c> methods that register an <see cref="IEventStoreProvider"/>. Events are grouped
+/// into domains via <see cref="AddDomain"/>; the convenience methods here target a single default
+/// domain for simple, single-context applications.
 /// </summary>
 [PublicAPI]
 public sealed class EventStoreBuilder
 {
-    private readonly EventTypeRegistry _registry;
+    /// <summary>The name of the implicit domain used by the top-level convenience methods.</summary>
+    public const string DefaultDomainName = "default";
 
-    internal EventStoreBuilder(IServiceCollection services, EventTypeRegistry registry)
-    {
-        Services = services;
-        _registry = registry;
-    }
+    private readonly List<string> _domains = [];
+
+    internal EventStoreBuilder(IServiceCollection services) => Services = services;
 
     /// <summary>The underlying service collection, for providers and advanced wiring.</summary>
     public IServiceCollection Services { get; }
 
-    /// <summary>Registers an event type under a logical name (defaulting to the type's name).</summary>
-    public EventStoreBuilder AddEventType<TEvent>(string? eventType = null)
+    internal IReadOnlyCollection<string> Domains => _domains;
+
+    /// <summary>
+    /// Configures a domain — a group of related events mapped to its own storage unit, with its own
+    /// ordering and subscriptions.
+    /// </summary>
+    public EventStoreBuilder AddDomain(string name, Action<DomainBuilder> configure)
     {
-        _registry.Register(typeof(TEvent), eventType ?? typeof(TEvent).Name);
+        RegisterDomain(name);
+        configure(new DomainBuilder(name, Services));
         return this;
     }
 
@@ -60,40 +69,70 @@ public sealed class EventStoreBuilder
         return this;
     }
 
-    /// <summary>Registers an upcaster applied to events on read.</summary>
+    /// <summary>
+    /// Uses the System.Text.Json source generator via a <see cref="JsonSerializerContext"/>: keeps the
+    /// readable, portable JSON format but serializes reflection-free — faster, and AOT/trim-safe.
+    /// </summary>
+    public EventStoreBuilder UseSystemTextJson(
+        JsonSerializerContext context,
+        Action<JsonSerializerOptions>? configure = null)
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { TypeInfoResolver = context };
+        configure?.Invoke(options);
+        Services.AddSingleton<IEventSerializer>(new SystemTextJsonEventSerializer(options));
+        return this;
+    }
+
+    /// <summary>Registers an event type in the default domain.</summary>
+    public EventStoreBuilder AddEventType<TEvent>(string? eventType = null)
+    {
+        Default.AddEventType<TEvent>(eventType);
+        return this;
+    }
+
+    /// <summary>Registers every concrete implementor of a marker type in the default domain.</summary>
+    public EventStoreBuilder AddEventTypesImplementing<TMarker>(Assembly? assembly = null)
+    {
+        Default.AddEventTypesImplementing<TMarker>(assembly);
+        return this;
+    }
+
+    /// <summary>Registers an upcaster in the default domain.</summary>
     public EventStoreBuilder AddUpcaster<TUpcaster>() where TUpcaster : class, IEventUpcaster
     {
-        Services.AddSingleton<IEventUpcaster, TUpcaster>();
+        Default.AddUpcaster<TUpcaster>();
         return this;
     }
 
-    /// <summary>Registers an upcaster instance applied to events on read.</summary>
-    public EventStoreBuilder AddUpcaster(IEventUpcaster upcaster)
-    {
-        Services.AddSingleton(upcaster);
-        return this;
-    }
-
-    /// <summary>
-    /// Registers an <see cref="IAggregateRepository{T}"/> for an aggregate type stored under the given
-    /// stream category. Pass a <paramref name="snapshotPolicy"/> to enable snapshotting (requires an
-    /// <see cref="ISnapshotStore"/> from the provider).
-    /// </summary>
+    /// <summary>Registers an aggregate repository in the default domain.</summary>
     public EventStoreBuilder AddAggregateRepository<T>(
         string category,
         Func<string, T> factory,
         ISnapshotPolicy? snapshotPolicy = null)
         where T : AggregateBase
     {
-        Services.AddScoped<IAggregateRepository<T>>(sp => new AggregateRepository<T>(
-            sp.GetRequiredService<IEventStore>(),
-            sp.GetRequiredService<IEventSerializer>(),
-            sp.GetRequiredService<IEventTypeRegistry>(),
-            sp.GetRequiredService<UpcasterChain>(),
-            category,
-            factory,
-            sp.GetService<ISnapshotStore>(),
-            snapshotPolicy));
+        Default.AddAggregateRepository(category, factory, snapshotPolicy);
         return this;
+    }
+
+    private DomainBuilder Default
+    {
+        get
+        {
+            if (field is not null)
+                return field;
+
+            RegisterDomain(DefaultDomainName);
+            return field = new DomainBuilder(DefaultDomainName, Services);
+        }
+    }
+
+    private void RegisterDomain(string name)
+    {
+        if (_domains.Contains(name))
+            return;
+
+        _domains.Add(name);
+        Services.AddSingleton(new RegisteredDomain(name));
     }
 }

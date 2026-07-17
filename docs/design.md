@@ -27,7 +27,7 @@ Rejected, with reasons:
 
 | Existing | Problem |
 |---|---|
-| `IEventStore<TAggregate>` with marker classes | The type parameter carries no information — it is a table selector (`Set<EventEntry>("ResourceEvents")`). Consequence: no global ordering across the four tables. Table-per-aggregate is storage configuration, not a type system concern. |
+| `IEventStore<TAggregate>` with marker classes | The type parameter carries no information — it is a table selector (`Set<EventEntry>("ResourceEvents")`). The grouping instinct was right (it becomes **domains**, D0), but encoding it in the type system is not: table-per-context is storage configuration, and the marker types gave no ordering, no `$all`, no contract. |
 | `MaxAsync` → check → `Add` | A TOCTOU race. Two transactions both read `max=5` and both write `6`. Only the unique index saves it, and that throws `DbUpdateException`, not `ConcurrencyException` — so the documented contract does not hold under load. |
 | `expectedVersion` as a bare `int` | No sentinels for `Any` / `NoStream` / `StreamExists`. |
 | `DeferCommit` as a public bool on the DbContext | A mutable flag on a shared object that switches another class's commit semantics is a trap under DI. The real need — caller-owned commits — belongs in an explicit transaction context (see D6), which is deferred past v1. |
@@ -40,6 +40,27 @@ Rejected, with reasons:
 | One snapshot per stream (upsert) | No history, no "snapshot at version N". |
 
 ## 3. Key decisions
+
+### D0 — The store is partitioned into domains, not flat
+
+Events that belong together form a **domain** (a bounded context), mapped 1:1 to its own storage
+unit: its own table(s) in EF Core, its own table or partition-key prefix in ATS, its own area in
+InMemory. This is the storage hint SAPId expressed as table-per-aggregate — the *concept* was right;
+only the mechanism (marker types as table selectors) was wrong. Domains give storage isolation and
+per-context performance.
+
+**The consequence that shapes everything else:** with separate storage per domain there is **no
+ordering across domains**. Each domain is an independent ordered log — its own version and
+`GlobalPosition` sequence, its own `$all`, its own subscriptions. A single cross-domain total order
+would need one shared physical store (defeating the partitioning) or a merge layer with the very
+sequencing problem D2 describes. Order within a context is what applications actually need; order
+across unrelated contexts is not.
+
+Access is per domain through `IEventStoreProvider.GetStore(domain)`, and each domain is also exposed
+as a keyed `IEventStore`. One provider (chosen once) backs all domains with separate units. Event
+types are registered per domain, in bulk via a marker/contract interface
+(`AddEventTypesImplementing<IBankingEvent>()`) or individually. A default domain keeps single-context
+apps simple.
 
 ### D1 — Capabilities instead of a lowest common denominator
 
@@ -140,6 +161,21 @@ The serializer is a pluggable extension slot: `IEventSerializer` (used for both 
 snapshots) defaults to System.Text.Json but is swapped via the builder — `UseSerializer(...)` for a
 custom implementation, or `UseSystemTextJson(o => …)` to adjust the JSON rules (naming policy,
 converters, unmapped-member handling) so fields can be mapped differently without writing one.
+
+**Why JSON is the default (and stays so):** the event log is the source of truth and lives for
+years, so readability is a feature — inspecting a row, auditing, ops tooling, forensics — and a
+text format keeps the durable log portable across languages and runtime versions. Binary formats
+(MemoryPack especially) trade that away; EventStoreDB, Marten and Axon all default to JSON for the
+same reason.
+
+Speed is addressed two ways without changing the default:
+
+- **Source-generated JSON** — `UseSystemTextJson(MyJsonContext.Default)` runs System.Text.Json
+  reflection-free via a `JsonSerializerContext`: faster and AOT/trim-safe, still readable JSON. This
+  is the primary answer to "reflection is slow", since it keeps the format.
+- **A different format** — `UseSerializer(...)` swaps in MessagePack/Protobuf/etc. (envisioned as
+  separate optional adapter packages, kept out of the core). Because serialization is per the
+  builder, a hot domain could use a binary format while the rest stay JSON.
 
 ### D5 — Snapshots are their own interface, and disposable
 

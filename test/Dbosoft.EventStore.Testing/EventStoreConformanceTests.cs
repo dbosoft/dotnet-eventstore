@@ -318,7 +318,7 @@ public abstract class EventStoreConformanceTests
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
-        await snapshots.SaveAsync("s1", 3, ConformanceHelpers.Event("Snapshot").Data);
+        await snapshots.SaveAsync("s1", 3, Event("Snapshot").Data);
 
         var act = () => maintenance.TruncateStreamAsync("s1", 3);
 

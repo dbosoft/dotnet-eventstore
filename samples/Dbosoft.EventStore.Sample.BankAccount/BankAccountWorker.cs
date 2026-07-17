@@ -12,14 +12,20 @@ namespace Dbosoft.EventStore.Sample.BankAccount;
 /// </summary>
 internal sealed class BankAccountWorker(
     IServiceScopeFactory scopeFactory,
-    ISubscriptionSource subscriptions,
-    IAllStreamReader allStream,
+    [FromKeyedServices(BankAccountWorker.Domain)] IEventStore bankingStore,
     ILoggerFactory loggerFactory,
     ILogger<BankAccountWorker> logger,
     IHostApplicationLifetime lifetime) : BackgroundService
 {
+    /// <summary>The domain the banking events live in.</summary>
+    public const string Domain = "banking";
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // The domain's store exposes the optional interfaces it supports (see StoreCapabilities).
+        var subscriptions = (ISubscriptionSource)bankingStore;
+        var allStream = (IAllStreamReader)bankingStore;
+
         var projection = new ConsoleProjection(loggerFactory.CreateLogger<ConsoleProjection>());
         await using var subscription = subscriptions.SubscribeToAll(GlobalPosition.Start, projection);
 

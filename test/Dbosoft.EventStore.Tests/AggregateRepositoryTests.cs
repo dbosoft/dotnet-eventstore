@@ -86,7 +86,8 @@ public sealed class AggregateRepositoryTests
     {
         await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5));
         var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
-        var maintenance = sp.GetRequiredService<IStreamMaintenance>();
+        var maintenance = (IStreamMaintenance)sp.GetRequiredService<IEventStoreProvider>()
+            .GetStore(EventStoreBuilder.DefaultDomainName);
 
         var counter = new Counter("c1");
         for (var i = 0; i < 6; i++)
@@ -109,7 +110,8 @@ public sealed class AggregateRepositoryTests
     {
         await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5));
         var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
-        var snapshots = sp.GetRequiredService<ISnapshotStore>();
+        var snapshots = sp.GetRequiredService<IEventStoreProvider>()
+            .GetSnapshotStore(EventStoreBuilder.DefaultDomainName)!;
 
         var counter = new Counter("c1");
         for (var i = 0; i < 6; i++)

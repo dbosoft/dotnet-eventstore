@@ -2,13 +2,19 @@ using Dbosoft.EventStore.Aggregates;
 
 namespace Dbosoft.EventStore.Sample.BankAccount;
 
+/// <summary>
+/// Marker (contract) for every event in the banking domain. Registering the domain with
+/// <c>AddEventTypesImplementing&lt;IBankingEvent&gt;()</c> picks all of them up at once.
+/// </summary>
+public interface IBankingEvent;
+
 // The events — the only things ever persisted. Payloads are plain records the serializer turns
 // into JSON; the type registry maps each to a stable logical name.
-public sealed record AccountOpened(string Owner);
+public sealed record AccountOpened(string Owner) : IBankingEvent;
 
-public sealed record Deposited(decimal Amount);
+public sealed record Deposited(decimal Amount) : IBankingEvent;
 
-public sealed record Withdrawn(decimal Amount);
+public sealed record Withdrawn(decimal Amount) : IBankingEvent;
 
 // The snapshot state, so a long-lived account need not replay from the first event.
 public sealed record AccountSnapshot(string Owner, decimal Balance);
