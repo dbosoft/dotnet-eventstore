@@ -10,6 +10,7 @@ namespace Dbosoft.EventStore.EfCore;
 [PublicAPI]
 public static class EventStoreModel
 {
+    /// <summary>Provider-specific tweaks applied to the event store's <see cref="ModelBuilder"/>.</summary>
     extension(ModelBuilder modelBuilder)
     {
         /// <summary>
