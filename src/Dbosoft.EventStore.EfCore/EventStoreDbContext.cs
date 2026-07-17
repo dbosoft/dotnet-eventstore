@@ -72,6 +72,7 @@ public sealed class EventStoreDbContext : DbContext
             b.ToTable("es_checkpoints");
             b.HasKey(c => c.Name);
             b.Property(c => c.Name).HasMaxLength(256);
+            b.Property(c => c.Token).HasMaxLength(128);
         });
 
         // Registration supplies any provider-specific model tweaks (concurrency token, converters).

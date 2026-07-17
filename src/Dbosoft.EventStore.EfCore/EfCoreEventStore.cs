@@ -8,7 +8,7 @@ namespace Dbosoft.EventStore.EfCore;
 /// <summary>
 /// The EF Core event store for one domain. It holds no context — every operation opens a fresh
 /// context from the factory and disposes it, so the store is safe to share and never keeps a global
-/// context. The append is race-free via the unique index on (domain, stream, version): a lost race is
+/// context. Appending is race-free via the unique index on (domain, stream, version): a lost race is
 /// a unique violation, translated to a concurrency conflict. A registration may add a version
 /// concurrency token for tidier conflict detection.
 /// </summary>
@@ -86,7 +86,7 @@ internal sealed class EfCoreEventStore(
                 Data = evt.Data.ToArray(),
                 Metadata = evt.Metadata?.ToArray(),
                 ContentType = evt.ContentType,
-                CreatedAt = timeProvider.GetUtcNow(),
+                CreatedAt = timeProvider.GetUtcNow()
             };
             ctx.Events.Add(lastRow);
         }
@@ -287,7 +287,7 @@ internal sealed class EfCoreEventStore(
             EventType = eventType,
             Data = JsonSerializer.SerializeToUtf8Bytes(marker, marker.GetType()),
             ContentType = "application/json",
-            CreatedAt = timeProvider.GetUtcNow(),
+            CreatedAt = timeProvider.GetUtcNow()
         });
     }
 
@@ -307,14 +307,14 @@ internal sealed class EfCoreEventStore(
             .OrderByDescending(v => v)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? 0;
 
-    private void EnsureExpectedVersion(string streamId, long expectedVersion, long currentVersion)
+    private static void EnsureExpectedVersion(string streamId, long expectedVersion, long currentVersion)
     {
         var satisfied = expectedVersion switch
         {
             ExpectedVersion.Any => true,
             ExpectedVersion.NoStream => currentVersion == 0,
             ExpectedVersion.StreamExists => currentVersion > 0,
-            _ => expectedVersion == currentVersion,
+            _ => expectedVersion == currentVersion
         };
 
         if (!satisfied)

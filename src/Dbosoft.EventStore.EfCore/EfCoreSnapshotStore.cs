@@ -26,7 +26,7 @@ internal sealed class EfCoreSnapshotStore(
                 StreamVersion = streamVersion,
                 Payload = payload.ToArray(),
                 ContentType = contentType,
-                CreatedAt = timeProvider.GetUtcNow(),
+                CreatedAt = timeProvider.GetUtcNow()
             });
         }
         else

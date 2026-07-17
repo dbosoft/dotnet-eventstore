@@ -3,6 +3,7 @@ using Dbosoft.EventStore.Testing;
 namespace Dbosoft.EventStore.EfCore.Tests;
 
 /// <summary>Runs the full event-store conformance suite against the EF Core provider on SQLite.</summary>
+[UsedImplicitly]
 public sealed class EfCoreConformanceTests : EventStoreConformanceTests, IDisposable
 {
     private readonly SqliteEventStoreFixture _fixture = new();
@@ -16,6 +17,7 @@ public sealed class EfCoreConformanceTests : EventStoreConformanceTests, IDispos
 }
 
 /// <summary>Runs the snapshot conformance suite against the EF Core provider on SQLite.</summary>
+[UsedImplicitly]
 public sealed class EfCoreSnapshotConformanceTests : SnapshotStoreConformanceTests, IDisposable
 {
     private readonly SqliteEventStoreFixture _fixture = new();
