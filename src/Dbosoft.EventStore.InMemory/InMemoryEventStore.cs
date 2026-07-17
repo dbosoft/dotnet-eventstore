@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 
 namespace Dbosoft.EventStore.InMemory;
 
@@ -37,7 +38,8 @@ public sealed class InMemoryEventStore
         | StoreCapabilities.TimeNavigation
         | StoreCapabilities.Truncation
         | StoreCapabilities.StreamDeletion
-        | StoreCapabilities.SnapshotHistory;
+        | StoreCapabilities.SnapshotHistory
+        | StoreCapabilities.Redaction;
 
     /// <inheritdoc />
     public Task<AppendResult> AppendToStreamAsync(
@@ -228,6 +230,8 @@ public sealed class InMemoryEventStore
             state.Events.RemoveAll(e => e.StreamVersion < beforeVersion);
             _all.RemoveAll(e => e.StreamId == streamId && e.StreamVersion < beforeVersion);
             state.TruncatedBefore = beforeVersion;
+
+            EmitMarker(SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion));
             return Task.CompletedTask;
         }
     }
@@ -252,6 +256,37 @@ public sealed class InMemoryEventStore
             else
                 state.EventIds.Clear();
 
+            EmitMarker(SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode));
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <inheritdoc />
+    public Task RedactEventAsync(
+        string streamId,
+        long version,
+        ReadOnlyMemory<byte> newData,
+        ReadOnlyMemory<byte>? newMetadata = null,
+        CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_streams.TryGetValue(streamId, out var state) || state.HardDeleted)
+                throw new StreamNotFoundException(streamId);
+
+            var index = state.Events.FindIndex(e => e.StreamVersion == version);
+            if (index < 0)
+                throw new StreamNotFoundException(streamId);
+
+            // Overwrite the payload in place: same version, position and id — only the bytes change.
+            var redacted = state.Events[index] with { Data = newData, Metadata = newMetadata };
+            state.Events[index] = redacted;
+            var allIndex = _all.FindIndex(e => e.StreamId == streamId && e.StreamVersion == version);
+            if (allIndex >= 0)
+                _all[allIndex] = redacted;
+
+            EmitMarker(SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version));
             return Task.CompletedTask;
         }
     }
@@ -267,6 +302,32 @@ public sealed class InMemoryEventStore
             var processed = options?.MaxStreams is { } max ? Math.Min(_streams.Count, max) : _streams.Count;
             return Task.FromResult(new ScavengeReport(processed, 0));
         }
+    }
+
+    // Appends a system marker event into $all so read models learn to forget or reproject. Kept in a
+    // reserved "$system" stream; must be called while holding the gate.
+    private void EmitMarker(string eventType, object marker)
+    {
+        if (!_streams.TryGetValue(SystemEventTypes.SystemStream, out var sys))
+        {
+            sys = new StreamState();
+            _streams[SystemEventTypes.SystemStream] = sys;
+        }
+
+        var entry = new Entry(
+            SystemEventTypes.SystemStream,
+            sys.Version + 1,
+            ++_sequence,
+            Guid.NewGuid(),
+            eventType,
+            JsonSerializer.SerializeToUtf8Bytes(marker, marker.GetType()),
+            null,
+            "application/json",
+            _timeProvider.GetUtcNow());
+
+        sys.Version = entry.StreamVersion;
+        sys.Events.Add(entry);
+        _all.Add(entry);
     }
 
     private void EnsureExpectedVersion(string streamId, long expectedVersion, long currentVersion)

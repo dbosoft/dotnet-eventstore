@@ -476,35 +476,38 @@ limit. Beyond that, v1 throws a clear exception; blob overflow is an optional la
 
 Tested against Azurite.
 
-## 7. Deletion, truncation, retention
+## 7. Deletion, truncation, retention, redaction — and their markers
 
-The core stays append-only; everything destructive is a separately registered capability.
+The core stays append-only; everything destructive is a separately registered capability. **Every
+destructive operation emits a system marker event into `$all`** (`SystemEventTypes`, carried in a
+reserved `$system` stream), so read models — which, over the bus, hold copies of the data — learn to
+forget or reproject. Destruction that did not propagate would leave the personal data alive in every
+projection; the log is rarely where the exposure is. The markers are the propagation.
 
-**Truncate-before** (`IStreamMaintenance.TruncateStreamAsync(streamId, beforeVersion)`) sets
-`TruncatedBefore` in the stream metadata and removes the events below it **physically**
-(immediately or at scavenge time, depending on the provider). Version numbers stay monotonic —
-nothing is renumbered, the versions below the boundary simply no longer exist.
+**Truncate-before** (`TruncateStreamAsync(streamId, beforeVersion)`) removes the events below the
+boundary **physically**; versions stay monotonic (nothing is renumbered). Refused unless a snapshot
+at `>= beforeVersion - 1` exists (the state must stay reconstructable — the load-time check in D5 is
+the read-side counterpart); `force: true` overrides loudly. Emits `$stream-truncated`.
 
-**The invariant the library enforces:** truncation is **refused** unless a snapshot with
-`Version >= beforeVersion - 1` exists, because otherwise the stream state can no longer be
-reconstructed. This is exactly the "cut off behind snapshots" case. `force: true` overrides it
-deliberately and loudly.
+**Delete-stream:** `DeleteMode.Soft` (events go, StreamId reusable) or `DeleteMode.Hard` (data gone,
+StreamId burned) — "id reusable vs id burned", not the soft/hard-tombstone of some other stores;
+both physically remove the events. Emits `$stream-deleted`.
 
-**Delete-stream:** `DeleteMode.Soft` (the events go, the StreamId may be reused) or `DeleteMode.Hard`
-(data gone, the StreamId permanently burned). Note this is "id reusable vs id burned", not the
-soft/hard-tombstone of some other stores — both physically remove the events.
+**Retention policies** in stream metadata: `MaxCount`, `MaxAge`. The scavenger applies them — e.g. an
+access log that keeps only a recent window and deletes older entries by timestamp, each removal
+propagating as a marker so the read side prunes in step.
 
-**Retention policies** in the stream metadata: `MaxCount`, `MaxAge`. The scavenger applies them —
-e.g. an access log that keeps only a recent window and deletes older entries by timestamp.
+**Redaction — the GDPR-erasure mechanism, and it *is* in scope** (`RedactEventAsync`, capability
+`Redaction`, emits `$event-redacted`). Erasing a subject's PII is **not** deleting a stream; it is
+**overwriting the personal fields of the affected events in place**. Contrary to an earlier read,
+this *preserves* the shape: the event's version, position and id are unchanged — only its
+`Data`/`Metadata` bytes change, so there is no hole. That is exactly why it is the right erasure tool
+and why it belongs in v1: "delete a stream" is not a GDPR answer, overwriting the PII is. The marker
+tells read models to reproject the redacted event.
 
-**Deletion and retention are about space and forgetting *old* history — not GDPR erasure.** Erasing
-a subject's personal data is a different problem with a different mechanism: **overwriting the PII**
-in the affected event payloads (redaction), not deleting a stream. Deletion also does not propagate:
-`$all` shows no tombstone, so a read model that already projected the data keeps it — purging
-downstream copies is the application's (bus consumers') job. Redaction of individual event payloads
-is **not in v1** (it breaks the shape-preserving property that truncation and whole-stream deletion
-keep) — it is a separate, explicitly-scoped capability if a real need arises. The library will not
-pretend "delete a stream" is a GDPR answer.
+Markers materialize to typed records (`StreamTruncatedMarker`, `StreamDeletedMarker`,
+`EventRedactedMarker`) via `IEventMaterializer`, which recognizes the reserved `$`-prefixed types and
+reads them as JSON regardless of the domain's serializer — so a bus consumer handles them uniformly.
 
 ## 8. Testing — the heart of the agnosticism
 

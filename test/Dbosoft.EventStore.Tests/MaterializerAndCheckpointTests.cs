@@ -45,6 +45,25 @@ public sealed class MaterializerAndCheckpointTests
     }
 
     [Fact]
+    public async Task Materializer_types_system_markers_regardless_of_registration()
+    {
+        var services = new ServiceCollection();
+        services.AddEventStore(es => es.UseInMemory().AddDomain("d", _ => { }));
+        await using var sp = services.BuildServiceProvider();
+        var materializer = sp.GetRequiredKeyedService<IEventMaterializer>("d");
+
+        var payload = "{\"streamId\":\"account-1\",\"beforeVersion\":5}"u8.ToArray();
+        var stored = new StoredEvent(
+            SystemEventTypes.SystemStream, 1, GlobalPosition.Start, Guid.NewGuid(),
+            SystemEventTypes.StreamTruncated, payload, null, "application/json", DateTimeOffset.UnixEpoch);
+
+        var marker = materializer.Materialize(stored);
+
+        marker.Should().BeOfType<StreamTruncatedMarker>();
+        ((StreamTruncatedMarker)marker).BeforeVersion.Should().Be(5);
+    }
+
+    [Fact]
     public async Task Checkpoint_store_round_trips()
     {
         var services = new ServiceCollection();

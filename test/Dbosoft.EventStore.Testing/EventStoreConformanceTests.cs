@@ -344,6 +344,53 @@ public abstract class EventStoreConformanceTests
         await act.Should().NotThrowAsync();
     }
 
+    [Fact]
+    public async Task Truncation_emits_a_marker_into_the_global_stream()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
+            || !store.Capabilities.HasFlag(StoreCapabilities.Truncation))
+            return;
+        var snapshots = GetSnapshotStore(store);
+        if (snapshots is null)
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
+        await snapshots.SaveAsync("s1", 3, Event("Snapshot").Data);
+        await maintenance.TruncateStreamAsync("s1", 3);
+
+        var all = new List<StoredEvent>();
+        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
+            all.Add(e);
+
+        all.Should().Contain(e => e.EventType == SystemEventTypes.StreamTruncated);
+    }
+
+    // ---- optional: redaction ----
+
+    [Fact]
+    public async Task Redaction_overwrites_the_payload_in_place_and_emits_a_marker()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
+            || !store.Capabilities.HasFlag(StoreCapabilities.Redaction))
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, [Event("Registered", "{\"pii\":\"secret\"}")]);
+        var redacted = "{\"pii\":\"[redacted]\"}"u8.ToArray();
+        await maintenance.RedactEventAsync("s1", 1, redacted);
+
+        var events = await store.ReadAllOf("s1");
+        events.Should().ContainSingle();
+        events[0].StreamVersion.Should().Be(1); // the slot survives — shape preserved
+        events[0].Data.ToArray().Should().Equal(redacted);
+
+        var all = new List<StoredEvent>();
+        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
+            all.Add(e);
+        all.Should().Contain(e => e.EventType == SystemEventTypes.EventRedacted);
+    }
+
     // ---- optional: deletion ----
 
     [Fact]

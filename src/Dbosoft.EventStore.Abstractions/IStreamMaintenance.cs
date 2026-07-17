@@ -1,9 +1,11 @@
 namespace Dbosoft.EventStore;
 
 /// <summary>
-/// Destructive operations that shrink the log: truncation, deletion and scavenging. Optional and
-/// deliberately separate from the append-only core; gated by <see cref="StoreCapabilities.Truncation"/>
-/// and <see cref="StoreCapabilities.StreamDeletion"/>.
+/// Destructive operations: truncation, deletion, scavenging and redaction. Optional and deliberately
+/// separate from the append-only core; gated by <see cref="StoreCapabilities.Truncation"/>,
+/// <see cref="StoreCapabilities.StreamDeletion"/> and <see cref="StoreCapabilities.Redaction"/>.
+/// Each destructive operation emits a system marker event into <c>$all</c> (see
+/// <see cref="SystemEventTypes"/>) so read models over the bus learn to forget or reproject.
 /// </summary>
 [PublicAPI]
 public interface IStreamMaintenance
@@ -28,4 +30,18 @@ public interface IStreamMaintenance
 
     /// <summary>Reclaims space from truncated and deleted streams and applies retention policies.</summary>
     Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Overwrites the payload of a single event in place — its version, position and id are kept, only
+    /// <see cref="StoredEvent.Data"/> (and metadata) change. This is PII erasure by redaction, not a
+    /// deletion: the event's slot survives, so the stream shape is preserved. A
+    /// <see cref="SystemEventTypes.EventRedacted"/> marker is emitted so read models reproject.
+    /// </summary>
+    /// <exception cref="StreamNotFoundException">The stream or the version does not exist.</exception>
+    Task RedactEventAsync(
+        string streamId,
+        long version,
+        ReadOnlyMemory<byte> newData,
+        ReadOnlyMemory<byte>? newMetadata = null,
+        CancellationToken ct = default);
 }
