@@ -1,44 +1,53 @@
 using Dbosoft.EventStore.Serialization;
-using Microsoft.Extensions.Logging;
 
 namespace Dbosoft.EventStore.Sample.IssueTracker;
+
+/// <summary>One row of the rendered board — a per-issue summary the presenter turns into a table.</summary>
+internal sealed record BoardRow(
+    string Id,
+    string Title,
+    string Status,
+    string Reporter,
+    string? Assignee,
+    int Comments,
+    string LastActivity);
 
 /// <summary>
 /// A read model that rebuilds the whole board from the domain's <c>$all</c> stream, folding typed
 /// issue events into a per-issue summary. It reads from <see cref="GlobalPosition.Start"/> every time,
-/// so on a later process run it shows the issues that a previous run persisted to SQLite — that is the
-/// durability the in-memory provider cannot give. It also reacts to the store's
-/// <see cref="EventRedactedMarker"/> so a value it had cached is dropped when the payload is scrubbed.
+/// so on a later process run it shows the issues a previous run persisted to SQLite — the durability
+/// the in-memory provider cannot give. It also reacts to the store's <see cref="EventRedactedMarker"/>,
+/// so a value it had cached is dropped when the payload is scrubbed. It returns data; the presenter
+/// decides how to render it.
 /// </summary>
-internal sealed class IssueBoardProjection(
-    IAllStreamReader source,
-    IEventMaterializer materializer,
-    ILogger<IssueBoardProjection> logger)
+internal sealed class IssueBoardProjection(IAllStreamReader source, IEventMaterializer materializer)
 {
-    public async Task RebuildAndPrintAsync(string label, CancellationToken ct = default)
+    public async Task<IReadOnlyList<BoardRow>> RebuildAsync(CancellationToken ct = default)
     {
         var board = new Dictionary<string, Entry>(StringComparer.Ordinal);
+        var order = new List<string>();
 
         await foreach (var stored in source.ReadAllAsync(GlobalPosition.Start, ct: ct).ConfigureAwait(false))
         {
             if (materializer.TryMaterialize(stored, out var payload))
-                Apply(board, stored, payload);
+                Apply(board, order, stored, payload);
         }
 
-        logger.LogInformation("── issue board ({Label}) ──", label);
-        foreach (var (id, e) in board.OrderBy(kv => kv.Key, StringComparer.Ordinal))
-            logger.LogInformation(
-                "  {Id}: \"{Title}\" [{Status}{Assignee}] · reported by {Reporter} · {Comments} comment(s) · last: {Last}",
-                id, e.Title, e.Status, e.Assignee is null ? "" : $" → {e.Assignee}", e.Reporter, e.Comments,
-                e.LastActivity ?? "—");
+        return order.Select(id =>
+        {
+            var e = board[id];
+            return new BoardRow(id, e.Title, e.Status, e.Reporter, e.Assignee, e.Comments, e.LastActivity ?? "—");
+        }).ToList();
     }
 
-    private void Apply(Dictionary<string, Entry> board, StoredEvent stored, object payload)
+    private static void Apply(Dictionary<string, Entry> board, List<string> order, StoredEvent stored, object payload)
     {
         switch (payload)
         {
             case IssueOpened opened:
-                board[Display(stored.StreamId)] = new Entry { Title = opened.Title, Reporter = opened.Reporter };
+                var id = Display(stored.StreamId);
+                if (board.TryAdd(id, new Entry { Title = opened.Title, Reporter = opened.Reporter }))
+                    order.Add(id);
                 break;
             case IssueCommented commented when board.TryGetValue(Display(stored.StreamId), out var commentedOn):
                 commentedOn.Comments++;
@@ -59,9 +68,6 @@ internal sealed class IssueBoardProjection(
             case EventRedactedMarker redacted when board.TryGetValue(Display(redacted.StreamId), out var redactedOn):
                 // The payload is already scrubbed on disk; the marker is how a consumer that cached the
                 // old value learns to forget it.
-                logger.LogInformation(
-                    "  (redaction propagated for {Stream} v{Version} — dropping the cached comment)",
-                    Display(redacted.StreamId), redacted.Version);
                 redactedOn.LastActivity = "[redacted]";
                 break;
         }

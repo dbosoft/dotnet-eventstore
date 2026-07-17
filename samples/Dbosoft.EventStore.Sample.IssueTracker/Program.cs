@@ -1,3 +1,4 @@
+using System.Text;
 using Dbosoft.EventStore.Aggregates;
 using Dbosoft.EventStore.DependencyInjection;
 using Dbosoft.EventStore.EfCore;
@@ -6,18 +7,22 @@ using Dbosoft.EventStore.Sample.IssueTracker;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 // A realistic host setup backed by an on-disk SQLite database, so state survives between runs. One
 // "tracking" aggregate domain holds Issue streams (markers go to $system, keeping the aggregate
 // streams clean). The EF Core provider creates a fresh context per operation from a factory — never a
 // global context — and persists snapshots and the consumer checkpoint. Run it twice with `dotnet run`.
 
-const string databaseFile = "issues.db";
+Console.OutputEncoding = Encoding.UTF8;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+// The sample narrates itself to the console via Report; keep the framework's own logging out of the way.
+builder.Logging.SetMinimumLevel(LogLevel.Warning);
+
 builder.Services.AddEventStore(eventStore => eventStore
-    .UseSqlite($"Data Source={databaseFile}")
+    .UseSqlite($"Data Source={SampleWorker.DatabaseFile}")
     .AddDomain(SampleWorker.Tracking, tracking => tracking
         .AddEventTypesImplementing<IIssueEvent>()
         .AddAggregateRepository(Issue.Category, id => new Issue(id), new EveryNEventsSnapshotPolicy(10))));
