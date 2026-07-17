@@ -17,12 +17,8 @@ public sealed record AccountSnapshot(string Owner, decimal Balance);
 /// A bank account aggregate: it decides what may happen (the public methods), folds events into
 /// state (<see cref="When"/>), and can summarize itself into a snapshot. It never touches the store.
 /// </summary>
-public sealed class BankAccount : AggregateBase, ISnapshotable
+public sealed class BankAccount(string id) : AggregateBase(id), ISnapshotable
 {
-    public BankAccount(string id) : base(id)
-    {
-    }
-
     public string Owner { get; private set; } = "";
     public decimal Balance { get; private set; }
 

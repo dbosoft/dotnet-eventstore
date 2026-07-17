@@ -8,4 +8,5 @@ namespace Dbosoft.EventStore;
 /// The global position of the last appended event, or <c>null</c> when the append was deferred to a
 /// caller-owned transaction and the position is not yet assigned. See <c>CommitMode.Deferred</c>.
 /// </param>
+[PublicAPI]
 public sealed record AppendResult(long NextExpectedVersion, GlobalPosition? Position);

@@ -8,6 +8,7 @@ namespace Dbosoft.EventStore;
 /// tick value on a key/value store); callers treat it only as an ordered, serializable value and
 /// must not parse it.
 /// </summary>
+[PublicAPI]
 public readonly record struct GlobalPosition(string Token) : IComparable<GlobalPosition>
 {
     /// <summary>The position before the first event. Reading from here yields the whole store.</summary>

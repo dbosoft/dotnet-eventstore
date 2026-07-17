@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore;
 /// back. Every provider implements this. Optional features (global reads, subscriptions, snapshots,
 /// maintenance) are separate interfaces gated by <see cref="Capabilities"/>.
 /// </summary>
+[PublicAPI]
 public interface IEventStore
 {
     /// <summary>The optional features this provider supports.</summary>

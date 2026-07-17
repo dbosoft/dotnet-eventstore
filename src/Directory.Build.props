@@ -1,0 +1,13 @@
+<Project>
+
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <!-- JetBrains.Annotations is used only to mark the public API surface (see AssemblyInfo.cs in
+       each library). PrivateAssets="all" keeps it out of the published NuGet dependencies; the
+       attributes live in metadata and are never needed at runtime. -->
+  <ItemGroup>
+    <PackageReference Include="JetBrains.Annotations" PrivateAssets="all" />
+    <Using Include="JetBrains.Annotations" />
+  </ItemGroup>
+
+</Project>

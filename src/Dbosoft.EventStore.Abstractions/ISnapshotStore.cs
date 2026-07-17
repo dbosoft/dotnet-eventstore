@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore;
 /// A provider may keep only the latest snapshot per stream, or a history of them
 /// (<see cref="StoreCapabilities.SnapshotHistory"/>).
 /// </summary>
+[PublicAPI]
 public interface ISnapshotStore
 {
     /// <summary>Writes a snapshot of <paramref name="streamId"/> at <paramref name="streamVersion"/>.</summary>

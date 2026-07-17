@@ -7,6 +7,7 @@ namespace Dbosoft.EventStore;
 /// awaited; a bounded-staleness provider uses <see cref="SafetyWindow"/> to stay far enough behind
 /// the write front that in-flight writes cannot be skipped. The provider documents which it reads.
 /// </summary>
+[PublicAPI]
 public sealed record SubscriptionOptions
 {
     /// <summary>

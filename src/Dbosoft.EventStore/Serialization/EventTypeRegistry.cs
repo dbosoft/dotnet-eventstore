@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 namespace Dbosoft.EventStore.Serialization;
 
 /// <summary>Default in-memory <see cref="IEventTypeRegistry"/>, safe for concurrent reads.</summary>
+[PublicAPI]
 public sealed class EventTypeRegistry : IEventTypeRegistry
 {
     private readonly ConcurrentDictionary<Type, string> _byType = new();

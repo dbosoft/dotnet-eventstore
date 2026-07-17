@@ -6,21 +6,16 @@ namespace Dbosoft.EventStore.InMemory;
 /// store serializes writes into a dense sequence, the handler sees every event exactly once, in
 /// order, with no gaps.
 /// </summary>
-internal sealed class InMemorySubscription : IAsyncDisposable
+internal sealed class InMemorySubscription(
+    InMemoryEventStore store,
+    GlobalPosition checkpoint,
+    IEventHandler handler,
+    SubscriptionOptions options) : IAsyncDisposable
 {
-    private readonly InMemoryEventStore _store;
-    private readonly IEventHandler _handler;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _signal = new(0, 1);
-    private GlobalPosition _position;
+    private GlobalPosition _position = checkpoint;
     private Task? _loop;
-
-    public InMemorySubscription(InMemoryEventStore store, GlobalPosition checkpoint, IEventHandler handler)
-    {
-        _store = store;
-        _handler = handler;
-        _position = checkpoint;
-    }
 
     public void Start() => _loop = Task.Run(() => RunAsync(_cts.Token));
 
@@ -42,9 +37,11 @@ internal sealed class InMemorySubscription : IAsyncDisposable
         while (!ct.IsCancellationRequested)
         {
             var delivered = false;
-            await foreach (var stored in _store.ReadAllAsync(_position, ct: ct).ConfigureAwait(false))
+            await foreach (var stored in store
+                               .ReadAllAsync(_position, maxCount: options.PageSize, ct: ct)
+                               .ConfigureAwait(false))
             {
-                await _handler.HandleAsync(stored, ct).ConfigureAwait(false);
+                await handler.HandleAsync(stored, ct).ConfigureAwait(false);
                 _position = stored.Position;
                 delivered = true;
             }
@@ -65,7 +62,7 @@ internal sealed class InMemorySubscription : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _store.RemoveSubscription(this);
+        store.RemoveSubscription(this);
         await _cts.CancelAsync().ConfigureAwait(false);
 
         if (_loop is not null)

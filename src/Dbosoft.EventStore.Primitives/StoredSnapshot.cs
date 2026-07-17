@@ -6,6 +6,7 @@ namespace Dbosoft.EventStore;
 /// <param name="Payload">The serialized snapshot state.</param>
 /// <param name="ContentType">The media type of <see cref="Payload"/>.</param>
 /// <param name="CreatedAt">When the snapshot was written.</param>
+[PublicAPI]
 public sealed record StoredSnapshot(
     string StreamId,
     long StreamVersion,

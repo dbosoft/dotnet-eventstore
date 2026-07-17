@@ -10,6 +10,7 @@ namespace Dbosoft.EventStore;
 /// <param name="Metadata">Optional serialized metadata.</param>
 /// <param name="ContentType">The media type of <see cref="Data"/> and <see cref="Metadata"/>.</param>
 /// <param name="CreatedAt">When the store recorded the event.</param>
+[PublicAPI]
 public sealed record StoredEvent(
     string StreamId,
     long StreamVersion,

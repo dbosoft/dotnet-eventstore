@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore;
 /// without <see cref="StoreCapabilities.ExactSubscriptions"/> a handler must tolerate redelivery and
 /// reordering within the store's safety window, so keep handling idempotent.
 /// </summary>
+[PublicAPI]
 public interface IEventHandler
 {
     /// <summary>Processes one event. The subscription advances its checkpoint once this completes.</summary>
@@ -15,6 +16,7 @@ public interface IEventHandler
 /// Starts catch-up subscriptions over the global sequence. Optional; gated by
 /// <see cref="StoreCapabilities.Subscriptions"/>.
 /// </summary>
+[PublicAPI]
 public interface ISubscriptionSource
 {
     /// <summary>

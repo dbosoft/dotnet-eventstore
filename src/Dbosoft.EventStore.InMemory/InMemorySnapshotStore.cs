@@ -4,6 +4,7 @@ namespace Dbosoft.EventStore.InMemory;
 /// Snapshot store backed by the same data as its <see cref="InMemoryEventStore"/>, keeping a version
 /// history per stream.
 /// </summary>
+[PublicAPI]
 public sealed class InMemorySnapshotStore : ISnapshotStore
 {
     private readonly InMemoryEventStore _store;
@@ -18,21 +19,29 @@ public sealed class InMemorySnapshotStore : ISnapshotStore
         string contentType = "application/json",
         CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         _store.SaveSnapshot(streamId, streamVersion, payload, contentType);
         return Task.CompletedTask;
     }
 
     /// <inheritdoc />
-    public Task<StoredSnapshot?> LoadLatestAsync(string streamId, CancellationToken ct = default) =>
-        Task.FromResult(_store.LoadSnapshot(streamId, long.MaxValue));
+    public Task<StoredSnapshot?> LoadLatestAsync(string streamId, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult(_store.LoadSnapshot(streamId, long.MaxValue));
+    }
 
     /// <inheritdoc />
-    public Task<StoredSnapshot?> LoadAtOrBeforeAsync(string streamId, long maxVersion, CancellationToken ct = default) =>
-        Task.FromResult(_store.LoadSnapshot(streamId, maxVersion));
+    public Task<StoredSnapshot?> LoadAtOrBeforeAsync(string streamId, long maxVersion, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult(_store.LoadSnapshot(streamId, maxVersion));
+    }
 
     /// <inheritdoc />
     public Task PruneAsync(string streamId, int keep, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         _store.PruneSnapshots(streamId, keep);
         return Task.CompletedTask;
     }

@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore.Serialization;
 /// ever see the current version. Upcasters are applied in a chain until none matches (see
 /// <see cref="UpcasterChain"/>).
 /// </summary>
+[PublicAPI]
 public interface IEventUpcaster
 {
     /// <summary>Whether this upcaster applies to the given event instance.</summary>

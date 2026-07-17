@@ -4,6 +4,7 @@ namespace Dbosoft.EventStore;
 /// Locates a global position from a wall-clock timestamp, so callers can replay from a point in
 /// time. Optional; gated by <see cref="StoreCapabilities.TimeNavigation"/>.
 /// </summary>
+[PublicAPI]
 public interface ITimeNavigable
 {
     /// <summary>

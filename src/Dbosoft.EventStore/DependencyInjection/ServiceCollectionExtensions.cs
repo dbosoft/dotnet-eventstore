@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 namespace Dbosoft.EventStore.DependencyInjection;
 
 /// <summary>Entry point for registering the event store with dependency injection.</summary>
+[PublicAPI]
 public static class ServiceCollectionExtensions
 {
     /// <summary>

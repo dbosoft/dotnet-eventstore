@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore;
 /// means the stream must currently be at exactly that version; the constants below relax or
 /// strengthen that check.
 /// </summary>
+[PublicAPI]
 public static class ExpectedVersion
 {
     /// <summary>Append regardless of the stream's current version.</summary>

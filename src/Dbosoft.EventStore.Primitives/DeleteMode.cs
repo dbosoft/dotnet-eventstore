@@ -1,6 +1,7 @@
 namespace Dbosoft.EventStore;
 
 /// <summary>How a stream is deleted.</summary>
+[PublicAPI]
 public enum DeleteMode
 {
     /// <summary>

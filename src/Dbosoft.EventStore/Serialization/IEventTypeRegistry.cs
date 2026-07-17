@@ -4,6 +4,7 @@ namespace Dbosoft.EventStore.Serialization;
 /// Maps between CLR event types and the stable logical type names written to the store. The logical
 /// name decouples the persisted stream from type renames and refactorings.
 /// </summary>
+[PublicAPI]
 public interface IEventTypeRegistry
 {
     /// <summary>Registers a CLR type under a logical name (defaulting to the type's name).</summary>

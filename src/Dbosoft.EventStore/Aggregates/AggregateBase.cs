@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore.Aggregates;
 /// fold both raised and replayed events in <see cref="When"/>. The repository drives rehydration via
 /// <see cref="ReplayEvent"/> and persistence via <see cref="UncommittedEvents"/>.
 /// </summary>
+[PublicAPI]
 public abstract class AggregateBase
 {
     private readonly List<object> _uncommitted = [];
@@ -13,7 +14,7 @@ public abstract class AggregateBase
     protected AggregateBase(string id) => Id = id;
 
     /// <summary>The aggregate's identity within its category.</summary>
-    public string Id { get; protected set; }
+    public string Id { get; }
 
     /// <summary>
     /// The number of events applied so far — equivalently, the version of the stream this aggregate

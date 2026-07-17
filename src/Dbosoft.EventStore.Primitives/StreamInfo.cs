@@ -9,6 +9,7 @@ namespace Dbosoft.EventStore;
 /// </param>
 /// <param name="IsDeleted">Whether the stream has been (soft-)deleted.</param>
 /// <param name="Metadata">Provider-defined stream metadata, or <c>null</c> when unset or unsupported.</param>
+[PublicAPI]
 public sealed record StreamInfo(
     string StreamId,
     long Version,

@@ -6,6 +6,7 @@ namespace Dbosoft.EventStore;
 /// the conformance suite tests only what is declared.
 /// </summary>
 [Flags]
+[PublicAPI]
 public enum StoreCapabilities
 {
     /// <summary>The core append/read contract only; no optional features.</summary>

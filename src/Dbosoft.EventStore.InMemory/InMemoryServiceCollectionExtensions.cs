@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 namespace Dbosoft.EventStore.InMemory;
 
 /// <summary>Registers the in-memory provider with dependency injection.</summary>
+[PublicAPI]
 public static class InMemoryServiceCollectionExtensions
 {
     /// <summary>

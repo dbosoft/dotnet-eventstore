@@ -1,6 +1,7 @@
 namespace Dbosoft.EventStore.Aggregates;
 
 /// <summary>Decides whether the repository writes a snapshot after an append.</summary>
+[PublicAPI]
 public interface ISnapshotPolicy
 {
     /// <summary>
@@ -10,6 +11,7 @@ public interface ISnapshotPolicy
 }
 
 /// <summary>Never snapshots. The default when no snapshot store is configured.</summary>
+[PublicAPI]
 public sealed class NoSnapshotPolicy : ISnapshotPolicy
 {
     /// <summary>A shared instance.</summary>
@@ -20,6 +22,7 @@ public sealed class NoSnapshotPolicy : ISnapshotPolicy
 }
 
 /// <summary>Snapshots whenever the version crosses a multiple of <c>n</c> events.</summary>
+[PublicAPI]
 public sealed class EveryNEventsSnapshotPolicy : ISnapshotPolicy
 {
     private readonly long _n;

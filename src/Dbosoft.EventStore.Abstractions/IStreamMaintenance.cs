@@ -5,6 +5,7 @@ namespace Dbosoft.EventStore;
 /// deliberately separate from the append-only core; gated by <see cref="StoreCapabilities.Truncation"/>
 /// and <see cref="StoreCapabilities.StreamDeletion"/>.
 /// </summary>
+[PublicAPI]
 public interface IStreamMaintenance
 {
     /// <summary>

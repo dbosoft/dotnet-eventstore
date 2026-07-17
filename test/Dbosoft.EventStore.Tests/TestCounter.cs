@@ -7,12 +7,8 @@ public sealed record Incremented(int By);
 public sealed record CounterSnapshot(int Value);
 
 /// <summary>A minimal snapshotable aggregate used by the repository and DI tests.</summary>
-public sealed class Counter : AggregateBase, ISnapshotable
+public sealed class Counter(string id) : AggregateBase(id), ISnapshotable
 {
-    public Counter(string id) : base(id)
-    {
-    }
-
     public int Value { get; private set; }
 
     public void Increment(int by) => Raise(new Incremented(by));

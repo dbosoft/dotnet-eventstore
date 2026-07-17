@@ -12,6 +12,7 @@ namespace Dbosoft.EventStore;
 /// <param name="Data">The serialized event payload.</param>
 /// <param name="Metadata">Optional serialized metadata (correlation, causation, headers).</param>
 /// <param name="ContentType">The media type of <see cref="Data"/> and <see cref="Metadata"/>.</param>
+[PublicAPI]
 public sealed record EventData(
     Guid EventId,
     string EventType,

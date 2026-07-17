@@ -8,6 +8,7 @@ namespace Dbosoft.EventStore.Aggregates;
 /// optional snapshot store governed by a policy.
 /// </summary>
 /// <typeparam name="T">The aggregate type.</typeparam>
+[PublicAPI]
 public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : AggregateBase
 {
     private readonly IEventStore _store;

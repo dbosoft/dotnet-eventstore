@@ -4,6 +4,7 @@ namespace Dbosoft.EventStore.Aggregates;
 /// Implemented by aggregates that can summarize their state into a snapshot, so the repository can
 /// rehydrate from the latest snapshot plus the events after it instead of the whole stream.
 /// </summary>
+[PublicAPI]
 public interface ISnapshotable
 {
     /// <summary>The CLR type of the snapshot state, used to deserialize a stored snapshot.</summary>

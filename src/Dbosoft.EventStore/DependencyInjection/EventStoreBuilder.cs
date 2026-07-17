@@ -8,6 +8,7 @@ namespace Dbosoft.EventStore.DependencyInjection;
 /// Fluent configuration for the event store, returned by <c>AddEventStore</c>. Providers extend this
 /// with <c>UseXxx</c> methods that register an <see cref="IEventStore"/> (and optional interfaces).
 /// </summary>
+[PublicAPI]
 public sealed class EventStoreBuilder
 {
     private readonly EventTypeRegistry _registry;

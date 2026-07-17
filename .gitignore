@@ -34,7 +34,7 @@ project.lock.json
 project.assets.json
 
 ## Local tooling output
-inspect.sarif
+inspect*.sarif
 
 ## Misc
 *.tmp

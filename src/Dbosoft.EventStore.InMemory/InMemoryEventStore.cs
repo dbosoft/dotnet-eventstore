@@ -8,10 +8,11 @@ namespace Dbosoft.EventStore.InMemory;
 /// clear; it is also handy for tests and samples. All writes are serialized, so its global sequence
 /// is dense and gap-free, which is why it can offer exact subscriptions.
 /// </summary>
+[PublicAPI]
 public sealed class InMemoryEventStore
     : IEventStore, IAllStreamReader, ITimeNavigable, ISubscriptionSource, IStreamMaintenance
 {
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private readonly Dictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
     private readonly List<Entry> _all = [];
     private readonly Dictionary<string, List<StoredSnapshot>> _snapshots = new(StringComparer.Ordinal);
@@ -140,6 +141,7 @@ public sealed class InMemoryEventStore
     /// <inheritdoc />
     public Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
             if (!_streams.TryGetValue(streamId, out var state) || state.HardDeleted)
@@ -179,12 +181,13 @@ public sealed class InMemoryEventStore
     /// <inheritdoc />
     public Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
             // The checkpoint to read *after*: the last event before the timestamp, so an exclusive
             // read starting here first yields the earliest event at or after it.
             var before = _all.Where(e => e.CreatedAt < timestamp).OrderBy(e => e.Sequence).LastOrDefault();
-            return Task.FromResult(before is null ? GlobalPosition.Start : before.Position);
+            return Task.FromResult(before?.Position ?? GlobalPosition.Start);
         }
     }
 
@@ -196,7 +199,7 @@ public sealed class InMemoryEventStore
     {
         ArgumentNullException.ThrowIfNull(handler);
 
-        var subscription = new InMemorySubscription(this, checkpoint, handler);
+        var subscription = new InMemorySubscription(this, checkpoint, handler, options ?? new SubscriptionOptions());
         lock (_gate)
             _subscriptions.Add(subscription);
 
@@ -211,6 +214,7 @@ public sealed class InMemoryEventStore
         bool force = false,
         CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
             if (!_streams.TryGetValue(streamId, out var state) || state.HardDeleted)
@@ -234,6 +238,7 @@ public sealed class InMemoryEventStore
     /// <inheritdoc />
     public Task DeleteStreamAsync(string streamId, DeleteMode mode, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         lock (_gate)
         {
             if (!_streams.TryGetValue(streamId, out var state) || state.HardDeleted)
@@ -257,9 +262,14 @@ public sealed class InMemoryEventStore
     /// <inheritdoc />
     public Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+
         // Truncation and deletion already free memory eagerly here, so a scavenge pass only reports.
         lock (_gate)
-            return Task.FromResult(new ScavengeReport(_streams.Count, 0));
+        {
+            var processed = options?.MaxStreams is { } max ? Math.Min(_streams.Count, max) : _streams.Count;
+            return Task.FromResult(new ScavengeReport(processed, 0));
+        }
     }
 
     private void EnsureExpectedVersion(string streamId, long expectedVersion, long currentVersion)

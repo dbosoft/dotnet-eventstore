@@ -3,6 +3,7 @@ using System.Text.Json;
 namespace Dbosoft.EventStore.Serialization;
 
 /// <summary>An <see cref="IEventSerializer"/> backed by <c>System.Text.Json</c>.</summary>
+[PublicAPI]
 public sealed class SystemTextJsonEventSerializer : IEventSerializer
 {
     private readonly JsonSerializerOptions _options;

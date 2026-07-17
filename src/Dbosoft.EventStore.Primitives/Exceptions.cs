@@ -1,6 +1,7 @@
 namespace Dbosoft.EventStore;
 
 /// <summary>Base type for all event store failures.</summary>
+[PublicAPI]
 public abstract class EventStoreException : Exception
 {
     /// <summary>Initializes the base exception with a message and optional inner exception.</summary>
@@ -15,6 +16,7 @@ public abstract class EventStoreException : Exception
 /// on an optimistic-concurrency conflict. <see cref="ActualVersion"/> lets a caller decide whether
 /// to retry or reload.
 /// </summary>
+[PublicAPI]
 public sealed class WrongExpectedVersionException : EventStoreException
 {
     /// <summary>Creates the exception describing the version mismatch.</summary>
@@ -37,6 +39,7 @@ public sealed class WrongExpectedVersionException : EventStoreException
 }
 
 /// <summary>Thrown when a stream is required to exist but does not.</summary>
+[PublicAPI]
 public sealed class StreamNotFoundException : EventStoreException
 {
     /// <summary>Creates the exception for the given stream.</summary>
@@ -51,6 +54,7 @@ public sealed class StreamNotFoundException : EventStoreException
 }
 
 /// <summary>Thrown when a stream has been deleted and can no longer be read or appended to.</summary>
+[PublicAPI]
 public sealed class StreamDeletedException : EventStoreException
 {
     /// <summary>Creates the exception for the given stream.</summary>
@@ -69,6 +73,7 @@ public sealed class StreamDeletedException : EventStoreException
 /// interface method whose backing <see cref="StoreCapabilities"/> flag is not declared, or a
 /// truncation that would leave the stream unreconstructable and was not forced.
 /// </summary>
+[PublicAPI]
 public sealed class NotSupportedByProviderException : EventStoreException
 {
     /// <summary>Creates the exception with an explanatory message.</summary>
