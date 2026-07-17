@@ -279,7 +279,7 @@ public sealed class InMemoryEventStore
             ExpectedVersion.Any => true,
             ExpectedVersion.NoStream => currentVersion == 0,
             ExpectedVersion.StreamExists => currentVersion > 0,
-            _ => expectedVersion == currentVersion,
+            _ => expectedVersion == currentVersion
         };
 
         if (!satisfied)

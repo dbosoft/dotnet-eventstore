@@ -12,7 +12,7 @@ public abstract class EventStoreException : Exception
 }
 
 /// <summary>
-/// Thrown when an append's <c>expectedVersion</c> does not match the stream's actual version, i.e.
+/// Thrown when an append operation's <c>expectedVersion</c> does not match the stream's actual version, i.e.
 /// on an optimistic-concurrency conflict. <see cref="ActualVersion"/> lets a caller decide whether
 /// to retry or reload.
 /// </summary>
@@ -28,7 +28,7 @@ public sealed class WrongExpectedVersionException : EventStoreException
         ActualVersion = actualVersion;
     }
 
-    /// <summary>The stream the append targeted.</summary>
+    /// <summary>The stream the append operation targeted.</summary>
     public string StreamId { get; }
 
     /// <summary>The version the caller expected.</summary>

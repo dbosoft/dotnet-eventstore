@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dbosoft.EventStore.Serialization;
 
 namespace Dbosoft.EventStore.Aggregates;
@@ -62,9 +63,8 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
         if (_snapshotStore is not null && aggregate is ISnapshotable snapshotable)
         {
             var snapshot = await _snapshotStore.LoadLatestAsync(streamId, ct).ConfigureAwait(false);
-            if (snapshot is not null)
+            if (snapshot is not null && TryDeserializeSnapshot(snapshotable, snapshot, out var state))
             {
-                var state = _serializer.Deserialize(snapshotable.SnapshotStateType, snapshot.Payload);
                 snapshotable.RestoreFromSnapshot(state, snapshot.StreamVersion);
                 fromVersion = snapshot.StreamVersion + 1;
                 exists = true;
@@ -123,5 +123,29 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
         var type = _registry.Resolve(stored.EventType);
         var @event = _serializer.Deserialize(type, stored.Data);
         return _upcasters.Upcast(@event);
+    }
+
+    /// <summary>
+    /// Deserializes a snapshot's state, treating any failure as "no usable snapshot". A snapshot is
+    /// disposable derived data, so a schema-incompatible or corrupt one must never fail a load — the
+    /// caller falls back to replaying the full event stream. Combined with a tolerant (schemaless)
+    /// serializer that ignores unknown members and defaults missing ones, additive changes to the
+    /// snapshot state just work, and breaking changes degrade gracefully to a full replay.
+    /// </summary>
+    private bool TryDeserializeSnapshot(
+        ISnapshotable snapshotable,
+        StoredSnapshot snapshot,
+        [MaybeNullWhen(false)] out object state)
+    {
+        try
+        {
+            state = _serializer.Deserialize(snapshotable.SnapshotStateType, snapshot.Payload);
+            return true;
+        }
+        catch (Exception) // serializer is pluggable; any deserialization failure means the snapshot
+        {                 // is unusable, and replaying from events is always a correct fallback.
+            state = null;
+            return false;
+        }
     }
 }

@@ -4,6 +4,7 @@ using Dbosoft.EventStore.Testing;
 namespace Dbosoft.EventStore.Tests;
 
 /// <summary>Runs the full event-store conformance suite against the in-memory reference provider.</summary>
+[UsedImplicitly]
 public sealed class InMemoryConformanceTests : EventStoreConformanceTests
 {
     protected override IEventStore CreateStore() => new InMemoryEventStore();
@@ -13,6 +14,7 @@ public sealed class InMemoryConformanceTests : EventStoreConformanceTests
 }
 
 /// <summary>Runs the snapshot conformance suite against the in-memory reference provider.</summary>
+[UsedImplicitly]
 public sealed class InMemorySnapshotConformanceTests : SnapshotStoreConformanceTests
 {
     protected override (ISnapshotStore Snapshots, StoreCapabilities Capabilities) CreateSnapshotStore()

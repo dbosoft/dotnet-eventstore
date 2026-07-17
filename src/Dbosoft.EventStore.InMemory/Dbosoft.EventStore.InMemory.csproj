@@ -6,7 +6,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Dbosoft.EventStore.Abstractions\Dbosoft.EventStore.Abstractions.csproj" />
+    <!-- References Core (not just Abstractions) so the provider can add a UseInMemory() method to
+         the EventStoreBuilder, keeping registration a single fluent chain. -->
+    <ProjectReference Include="..\Dbosoft.EventStore\Dbosoft.EventStore.csproj" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
   </ItemGroup>
 

@@ -2,7 +2,7 @@ namespace Dbosoft.EventStore.Serialization;
 
 /// <summary>
 /// Applies a set of <see cref="IEventUpcaster"/> to an event, repeating until no upcaster matches so
-/// multi-step upgrades (v1→v2→v3) compose. A hop limit guards against upcasters that keep matching.
+/// chained upgrades (v1→v2→v3) compose. A hop limit guards against upcasters that keep matching.
 /// </summary>
 [PublicAPI]
 public sealed class UpcasterChain

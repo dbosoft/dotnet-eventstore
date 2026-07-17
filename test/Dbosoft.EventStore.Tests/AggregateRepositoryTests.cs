@@ -12,8 +12,8 @@ public sealed class AggregateRepositoryTests
     private static ServiceProvider BuildProvider(ISnapshotPolicy? policy = null)
     {
         var services = new ServiceCollection();
-        services.AddInMemoryEventStore();
         services.AddEventStore(b => b
+            .UseInMemory()
             .AddEventType<Incremented>()
             .AddAggregateRepository("counter", id => new Counter(id), policy));
         return services.BuildServiceProvider();
@@ -99,6 +99,29 @@ public sealed class AggregateRepositoryTests
 
         var loaded = await repo.LoadAsync("c1");
 
+        loaded.Should().NotBeNull();
+        loaded.Value.Should().Be(6);
+        loaded.Version.Should().Be(6);
+    }
+
+    [Fact]
+    public async Task Load_falls_back_to_replay_when_a_snapshot_cannot_be_deserialized()
+    {
+        await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5));
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+        var snapshots = sp.GetRequiredService<ISnapshotStore>();
+
+        var counter = new Counter("c1");
+        for (var i = 0; i < 6; i++)
+            counter.Increment(1);
+        await repo.SaveAsync(counter);
+
+        // Simulate a snapshot whose schema no longer deserializes into the current state type.
+        await snapshots.SaveAsync("counter-c1", 6, "\"not an object\""u8.ToArray());
+
+        var loaded = await repo.LoadAsync("c1");
+
+        // The unusable snapshot is ignored and the aggregate is rebuilt from the events.
         loaded.Should().NotBeNull();
         loaded.Value.Should().Be(6);
         loaded.Version.Should().Be(6);

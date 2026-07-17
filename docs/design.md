@@ -30,7 +30,7 @@ Rejected, with reasons:
 | `IEventStore<TAggregate>` with marker classes | The type parameter carries no information — it is a table selector (`Set<EventEntry>("ResourceEvents")`). Consequence: no global ordering across the four tables. Table-per-aggregate is storage configuration, not a type system concern. |
 | `MaxAsync` → check → `Add` | A TOCTOU race. Two transactions both read `max=5` and both write `6`. Only the unique index saves it, and that throws `DbUpdateException`, not `ConcurrencyException` — so the documented contract does not hold under load. |
 | `expectedVersion` as a bare `int` | No sentinels for `Any` / `NoStream` / `StreamExists`. |
-| `DeferCommit` as a public bool on the DbContext | The right idea in the wrong place — see D6. A mutable flag on a shared object that switches another class's commit semantics is a trap under DI. |
+| `DeferCommit` as a public bool on the DbContext | A mutable flag on a shared object that switches another class's commit semantics is a trap under DI. The real need — caller-owned commits — belongs in an explicit transaction context (see D6), which is deferred past v1. |
 | No `$all` read | `Position` exists on the record but cannot be read by. Read model rebuilds and catch-up cannot be built generically. |
 | `GetSnapshotsByTypeAsync`, `ResourceSnapshotEntry.ResourceType`, `SapRoleSnapshotEntry.SystemId/Client` | The snapshot table is being used as a read model. Plus `ResourceTypeFromStreamId` with `IndexOf('-')` — an undocumented string contract. Domain knowledge that does not belong in a general library. |
 | `ReadStreamAsync` without paging | Always materializes the entire stream. |
@@ -136,31 +136,41 @@ which is correct, because `$all` order is defined by the index, not by the strea
 aggregates live in optional packages above it. If you only want a log, you pay nothing for the
 rest.
 
-### D5 — Snapshots are their own interface
+The serializer is a pluggable extension slot: `IEventSerializer` (used for both events and
+snapshots) defaults to System.Text.Json but is swapped via the builder — `UseSerializer(...)` for a
+custom implementation, or `UseSystemTextJson(o => …)` to adjust the JSON rules (naming policy,
+converters, unmapped-member handling) so fields can be mapped differently without writing one.
+
+### D5 — Snapshots are their own interface, and disposable
 
 `ISnapshotStore`, not part of `IEventStore`. Keyed by `(StreamId, StreamVersion)`, so history is
 possible. No domain-specific query methods — that is what projections are for.
 
-### D6 — Commit mode is explicit and configurable, not a flag on a shared context
+A snapshot is a memoized fold of the stream, never the source of truth: it can always be discarded
+and rebuilt by replaying. Schema evolution of the snapshot state is handled **not** by an upcaster
+chain (as events are) but by two properties:
 
-The underlying need in SAPId is real: when there is **no** ambient transaction, the caller may
-still want to own the commit and batch the store's writes with the rest of its unit of work. So
-the capability stays — but as a registration-time option with a per-call override, not as a
-mutable public bool on a `DbContext` that other components share.
+- **Schemaless/tolerant deserialization** — the serializer ignores unknown members and defaults
+  missing ones (System.Text.Json does this by default; `UseSystemTextJson` tunes it), so additive
+  changes to the snapshot state just work.
+- **Best-effort load** — if a snapshot still fails to deserialize (a breaking change, or
+  corruption), the repository discards it and rebuilds from the event stream instead of failing the
+  load. A snapshot can never break reading.
 
-```csharp
-public enum CommitMode { Eager, Deferred }
-```
+This is also why truncation (§7) requires a covering snapshot: the snapshot is what lets old events
+be dropped while the state stays reconstructable.
 
-`Eager` is the default.
+### D6 — Caller-owned transactions are a future unit-of-work context, not a commit-mode flag
 
-**Consequences of `Deferred` that must be documented loudly** (they are silently implicit in
-SAPId today):
+The underlying need in SAPId is real: when the caller wants to batch the store's writes with the
+rest of its work and own the commit. But the answer is **not** a `Deferred` commit mode — a flag
+that silently moves conflict detection to the caller's commit and leaves `AppendResult.Position`
+unassigned is exactly the kind of hidden-semantics trap the SAPId `DeferCommit` bool already is.
 
-- Conflict detection moves to the *caller's* commit. `AppendToStreamAsync` no longer throws
-  `WrongExpectedVersionException` — the caller's `SaveChangesAsync` does.
-- `AppendResult.Position` is not yet assigned at append time, because the identity value does not
-  exist until the insert happens.
+The right shape is an explicit **transaction / unit-of-work context** the caller opens and commits,
+with the store enlisting in it — so the participation is visible in the call, not toggled on a
+shared object. That is deliberately **out of scope for v1**: the store commits eagerly, and the
+UoW context is designed and added later.
 
 ### D7 — Deletion means actual deletion
 
@@ -333,8 +343,8 @@ Zero rows affected means a conflict — deterministic, no exception sniffing, wo
 database. The event rows follow in the same transaction. The `Streams` head deliberately mirrors
 the ATS `HEAD` entity (§6): one concept, two providers.
 
-**Commit mode** per D6: `Eager` by default. `Deferred` only tracks the entities and lets the
-caller's unit of work commit — with the documented shift in when conflicts surface.
+**Commits** are eager in v1: each append opens and commits its own transaction. Enlisting in a
+caller-owned transaction is the future unit-of-work context (D6), not part of the first cut.
 
 **`$all`:** `WHERE Position > @p ORDER BY Position` on the PK index, with gap detection per D3.
 Declares `ExactSubscriptions`.
@@ -433,26 +443,30 @@ contract.
 
 The contract stack is layered `Primitives → Abstractions → Core`, all sharing the base namespace
 `Dbosoft.EventStore` (assembly name ≠ namespace, the standard MS library pattern). The dividing
-line: no interface in Primitives, no bare data type in Abstractions. Providers reference
-Abstractions and are single-package leaves — the three-way split applies to the contract stack,
-not to leaves that define nothing contract-worthy.
+line: no interface in Primitives, no bare data type in Abstractions.
+
+A provider's store implementation needs only Abstractions, but each provider package also ships a
+`UseXxx(this EventStoreBuilder)` DI extension so registration is a single fluent chain
+(`AddEventStore(b => b.UseInMemory().AddEventType<…>()…)`, the EF-Core-style pattern). Since
+`EventStoreBuilder` lives in Core, the provider packages reference Core. A third-party provider that
+ships no DI sugar could reference Abstractions alone.
 
 | Package | Contents | Dependencies |
 |---|---|---|
 | `Dbosoft.EventStore.Primitives` | value types, records, enums, exceptions, capabilities | none |
 | `Dbosoft.EventStore.Abstractions` | interfaces | Primitives |
 | `Dbosoft.EventStore` | serializer, event type registry, upcasting, aggregate repository, snapshot policy, DI | Abstractions |
-| `Dbosoft.EventStore.EfCore` | EF Core provider | Abstractions, EFCore.Relational |
-| `Dbosoft.EventStore.AzureTables` | ATS provider | Abstractions, Azure.Data.Tables |
-| `Dbosoft.EventStore.InMemory` | reference / test implementation | Abstractions |
+| `Dbosoft.EventStore.EfCore` | EF Core provider | Core, EFCore.Relational |
+| `Dbosoft.EventStore.AzureTables` | ATS provider | Core, Azure.Data.Tables |
+| `Dbosoft.EventStore.InMemory` | reference / test implementation | Core |
 | `Dbosoft.EventStore.Testing` | conformance suite | Abstractions, xunit, AwesomeAssertions |
 
 ## 10. Phased plan
 
 1. **Abstractions + InMemory + conformance suite.** The contract is defined by the tests. InMemory
    is the reference implementation the suite proves itself against.
-2. **EF Core provider** — `Streams` head table, race-free append, paging, commit modes. Against
-   SQLite + PostgreSQL + SQL Server.
+2. **EF Core provider** — `Streams` head table, race-free append, paging. Against SQLite +
+   PostgreSQL + SQL Server.
 3. **Core layer** — serializer, type registry, upcasting, aggregate repository, snapshot policy.
 4. **Truncation / retention / scavenge / delete**, including the snapshot invariant from §7.
 5. **`$all` + catch-up subscriptions** — gap detection on SQL, the exact-vs-bounded split from D3.

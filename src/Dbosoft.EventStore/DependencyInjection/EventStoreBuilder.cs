@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Dbosoft.EventStore.Aggregates;
 using Dbosoft.EventStore.Serialization;
 using Microsoft.Extensions.DependencyInjection;
@@ -26,6 +27,36 @@ public sealed class EventStoreBuilder
     public EventStoreBuilder AddEventType<TEvent>(string? eventType = null)
     {
         _registry.Register(typeof(TEvent), eventType ?? typeof(TEvent).Name);
+        return this;
+    }
+
+    /// <summary>
+    /// Replaces the serializer used for events and snapshots with a custom instance. The default is
+    /// <see cref="SystemTextJsonEventSerializer"/>; plug in your own to change the wire format or
+    /// mapping rules.
+    /// </summary>
+    public EventStoreBuilder UseSerializer(IEventSerializer serializer)
+    {
+        Services.AddSingleton(serializer);
+        return this;
+    }
+
+    /// <summary>Replaces the serializer with one resolved from the container.</summary>
+    public EventStoreBuilder UseSerializer<TSerializer>() where TSerializer : class, IEventSerializer
+    {
+        Services.AddSingleton<IEventSerializer, TSerializer>();
+        return this;
+    }
+
+    /// <summary>
+    /// Keeps the System.Text.Json serializer but adjusts its options — naming policy, converters,
+    /// unmapped-member handling — so fields can be mapped differently without writing a serializer.
+    /// </summary>
+    public EventStoreBuilder UseSystemTextJson(Action<JsonSerializerOptions> configure)
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        configure(options);
+        Services.AddSingleton<IEventSerializer>(new SystemTextJsonEventSerializer(options));
         return this;
     }
 

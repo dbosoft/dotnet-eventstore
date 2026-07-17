@@ -18,12 +18,15 @@ public static class ServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(configure);
 
         var registry = new EventTypeRegistry();
+        var builder = new EventStoreBuilder(services, registry);
+        configure(builder);
+
+        // Register defaults last, so anything the caller plugged in (e.g. UseSerializer) takes
+        // precedence — TryAdd only fills what is still missing.
         services.TryAddSingleton<IEventTypeRegistry>(registry);
         services.TryAddSingleton<IEventSerializer>(new SystemTextJsonEventSerializer());
         services.TryAddSingleton(sp => new UpcasterChain(sp.GetServices<IEventUpcaster>()));
 
-        var builder = new EventStoreBuilder(services, registry);
-        configure(builder);
         return builder;
     }
 }

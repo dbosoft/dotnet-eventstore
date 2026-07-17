@@ -10,7 +10,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Dbosoft.EventStore\Dbosoft.EventStore.csproj" />
     <ProjectReference Include="..\..\src\Dbosoft.EventStore.InMemory\Dbosoft.EventStore.InMemory.csproj" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
   </ItemGroup>
 
 </Project>
