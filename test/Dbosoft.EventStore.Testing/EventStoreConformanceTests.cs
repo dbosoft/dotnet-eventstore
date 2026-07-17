@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AwesomeAssertions;
 using Xunit;
 using static Dbosoft.EventStore.Testing.ConformanceHelpers;
@@ -282,6 +283,35 @@ public abstract class EventStoreConformanceTests
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
+    [Fact]
+    public async Task Concurrent_identical_batch_appends_are_idempotent()
+    {
+        var store = CreateStore();
+        var batch = Events(3);
+
+        // At-least-once redelivery of the very same batch: many callers race to append identical
+        // events. Idempotency is batch-scoped, so every caller must see success at the same version
+        // and the batch must land exactly once — no caller may get a version conflict.
+        var outcomes = new ConcurrentBag<AppendResult>();
+        var failures = new ConcurrentBag<Exception>();
+        var racers = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            try
+            {
+                outcomes.Add(await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, batch));
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }));
+        await Task.WhenAll(racers);
+
+        failures.Should().BeEmpty();
+        outcomes.Should().OnlyContain(r => r.NextExpectedVersion == 3);
+        (await store.ReadAllOf("s1")).Should().HaveCount(3);
+    }
+
     // ---- optional: time navigation ----
 
     [Fact]
@@ -323,6 +353,26 @@ public abstract class EventStoreConformanceTests
         var info = await store.GetStreamInfoAsync("s1");
         info.Should().NotBeNull();
         info.TruncatedBefore.Should().Be(3);
+        info.Version.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task Truncation_beyond_the_head_is_clamped_to_the_end()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.Truncation))
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
+
+        // A truncation point past the head drops every event but must not leave the head reporting a
+        // nonsensical boundary beyond where the stream ends.
+        await maintenance.TruncateStreamAsync("s1", 100, force: true);
+
+        (await store.ReadAllOf("s1")).Should().BeEmpty();
+        var info = await store.GetStreamInfoAsync("s1");
+        info.Should().NotBeNull();
+        info.TruncatedBefore.Should().Be(6);
         info.Version.Should().Be(5);
     }
 
@@ -421,5 +471,64 @@ public abstract class EventStoreConformanceTests
 
         var act = () => store.AppendToStreamAsync("s1", ExpectedVersion.Any, Events(1));
         await act.Should().ThrowAsync<StreamDeletedException>();
+    }
+
+    [Fact]
+    public async Task Soft_delete_then_recreate_continues_the_version_sequence()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion))
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+        await maintenance.DeleteStreamAsync("s1", DeleteMode.Soft);
+
+        // A soft-deleted id is reusable, but versioning resumes where it left off rather than resetting
+        // — the recreation path is an ordinary append, not a fresh NoStream one.
+        var recreated = await store.AppendToStreamAsync("s1", ExpectedVersion.Any, Events(1));
+
+        recreated.NextExpectedVersion.Should().Be(4);
+        var events = await store.ReadAllOf("s1");
+        events.Should().ContainSingle();
+        events[0].StreamVersion.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task Repeated_soft_delete_is_idempotent_and_emits_one_marker()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
+            || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion)
+            || !store.Capabilities.HasFlag(StoreCapabilities.AllStreamReads))
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+        await maintenance.DeleteStreamAsync("s1", DeleteMode.Soft);
+        await maintenance.DeleteStreamAsync("s1", DeleteMode.Soft);
+
+        // Deleting an already-soft-deleted stream is a no-op: it must not re-emit a tombstone.
+        var all = new List<StoredEvent>();
+        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
+            all.Add(e);
+
+        all.Count(e => e.EventType == SystemEventTypes.StreamDeleted).Should().Be(1);
+    }
+
+    // ---- optional: scavenge ----
+
+    [Fact]
+    public async Task Scavenge_honours_the_max_streams_bound()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance)
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+        await store.AppendToStreamAsync("s2", ExpectedVersion.NoStream, Events(1));
+        await store.AppendToStreamAsync("s3", ExpectedVersion.NoStream, Events(1));
+
+        var report = await maintenance.ScavengeAsync(new ScavengeOptions { MaxStreams = 1 });
+
+        report.StreamsProcessed.Should().BeLessThanOrEqualTo(1);
     }
 }

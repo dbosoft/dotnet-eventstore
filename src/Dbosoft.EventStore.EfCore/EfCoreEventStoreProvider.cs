@@ -37,11 +37,16 @@ public sealed class EfCoreEventStoreProvider : IEventStoreProvider
     public IEventStore GetStore(string domain) =>
         _stores.GetOrAdd(domain, key =>
         {
-            var options = _options.GetValueOrDefault(key) ?? new DomainOptions();
+            if (!_options.TryGetValue(key, out var options))
+                throw new ArgumentException($"Domain '{key}' is not registered.", nameof(domain));
             return new EfCoreEventStore(_factory, key, _timeProvider, options.InBandMarkers, options.TombstoneRetention);
         });
 
     /// <inheritdoc />
-    public ISnapshotStore GetSnapshotStore(string domain) =>
-        _snapshots.GetOrAdd(domain, key => new EfCoreSnapshotStore(_factory, key, _timeProvider));
+    public ISnapshotStore GetSnapshotStore(string domain)
+    {
+        if (!_options.ContainsKey(domain))
+            throw new ArgumentException($"Domain '{domain}' is not registered.", nameof(domain));
+        return _snapshots.GetOrAdd(domain, key => new EfCoreSnapshotStore(_factory, key, _timeProvider));
+    }
 }

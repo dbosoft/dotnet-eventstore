@@ -4,6 +4,9 @@
     <RootNamespace>Dbosoft.EventStore.Testing</RootNamespace>
     <Description>Capability-gated conformance test suite for Dbosoft event store providers.</Description>
     <IsPackable>true</IsPackable>
+    <!-- A shared library of abstract base suites, not a runnable test assembly: the derived provider
+         projects carry the test SDK and run these facts. Keep `dotnet test` from executing it directly. -->
+    <IsTestProject>false</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>

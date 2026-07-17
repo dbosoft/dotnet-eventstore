@@ -219,6 +219,10 @@ public sealed class InMemoryEventStore
             if (!_streams.TryGetValue(streamId, out var state) || state.HardDeleted)
                 throw new StreamNotFoundException(streamId);
 
+            // A truncation point past the head means "drop everything"; clamp it so the recorded
+            // boundary never runs beyond the end of the stream.
+            beforeVersion = Math.Min(beforeVersion, state.Version + 1);
+
             if (!force && LatestSnapshotVersion(streamId) < beforeVersion - 1)
                 throw new NotSupportedByProviderException(
                     $"Truncating stream '{streamId}' before version {beforeVersion} would leave it "
@@ -249,6 +253,11 @@ public sealed class InMemoryEventStore
         {
             if (!_streams.TryGetValue(streamId, out var state) || state.HardDeleted)
                 throw new StreamNotFoundException(streamId);
+
+            // Deleting an already-soft-deleted stream is a no-op — don't re-emit a tombstone. A stream
+            // recreated after deletion clears IsDeleted on append, so this only skips a true repeat.
+            if (mode == DeleteMode.Soft && state.IsDeleted)
+                return Task.CompletedTask;
 
             state.Events.Clear();
             _all.RemoveAll(e => e.StreamId == streamId);

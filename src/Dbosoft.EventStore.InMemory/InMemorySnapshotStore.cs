@@ -41,6 +41,7 @@ public sealed class InMemorySnapshotStore : ISnapshotStore
     /// <inheritdoc />
     public Task PruneAsync(string streamId, int keep, CancellationToken ct = default)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(keep);
         ct.ThrowIfCancellationRequested();
         _store.PruneSnapshots(streamId, keep);
         return Task.CompletedTask;

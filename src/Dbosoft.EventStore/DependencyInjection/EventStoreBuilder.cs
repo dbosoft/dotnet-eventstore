@@ -34,8 +34,12 @@ public sealed class EventStoreBuilder
     /// </summary>
     public EventStoreBuilder AddDomain(string name, Action<DomainBuilder> configure)
     {
+        if (_domains.Contains(name))
+            throw new InvalidOperationException($"Domain '{name}' is already registered.");
+
         var domain = new DomainBuilder(name, Services);
         configure(domain);
+        domain.Validate();
         RegisterDomain(name, domain.Options);
         return this;
     }

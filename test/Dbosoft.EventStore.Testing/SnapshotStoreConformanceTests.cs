@@ -61,4 +61,17 @@ public abstract class SnapshotStoreConformanceTests
         (await snapshots.LoadAtOrBeforeAsync("s1", 2)).Should().BeNull();
         (await snapshots.LoadLatestAsync("s1"))!.StreamVersion.Should().Be(3);
     }
+
+    [Fact]
+    public async Task Prune_with_a_negative_keep_is_rejected()
+    {
+        var (snapshots, _) = CreateSnapshotStore();
+        await snapshots.SaveAsync("s1", 1, Event("Snap").Data);
+
+        // A negative keep is a caller error; it must be refused consistently, never silently wipe.
+        var act = () => snapshots.PruneAsync("s1", -1);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        (await snapshots.LoadLatestAsync("s1")).Should().NotBeNull();
+    }
 }

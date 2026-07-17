@@ -4,7 +4,11 @@ namespace Dbosoft.EventStore;
 [PublicAPI]
 public sealed record ScavengeOptions
 {
-    /// <summary>Apply per-stream retention policies (max count, max age) while scavenging.</summary>
+    /// <summary>
+    /// Reserved for a future retention engine that will apply per-stream policies (max count, max age)
+    /// during a scavenge. No provider acts on it yet; today a scavenge only reclaims expired
+    /// <c>$system</c> tombstones.
+    /// </summary>
     public bool ApplyRetention { get; init; } = true;
 
     /// <summary>Upper bound on streams processed in this pass; <c>null</c> for no limit.</summary>

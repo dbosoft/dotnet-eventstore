@@ -105,9 +105,26 @@ internal sealed class EfCoreEventStore(
         }
         catch (Exception ex) when (ex is DbUpdateConcurrencyException or DbUpdateException)
         {
-            // A concurrent append took the version (head token mismatch, or a unique-index violation
-            // on (stream, version)/(stream, id)). Re-read the head to report the actual version.
+            // The save failed. Rather than depend on provider-specific error codes to tell a unique-index
+            // violation from anything else, re-read and classify by the resulting state: the same batch
+            // now fully present is a concurrent idempotent replay; an advanced head is a version conflict;
+            // an unchanged head means the failure was not concurrency-related, so surface it unmasked.
+            await using var check = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            var stored = await check.Events
+                .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
+                .Select(e => new { e.StreamVersion, e.Position })
+                .ToListAsync(ct).ConfigureAwait(false);
+
+            if (stored.Count == events.Count)
+            {
+                var last = stored.MaxBy(e => e.StreamVersion)!;
+                return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+            }
+
             var actual = await CurrentVersionAsync(streamId, ct).ConfigureAwait(false);
+            if (stored.Count == 0 && actual == current)
+                throw;
+
             throw new WrongExpectedVersionException(streamId, expectedVersion, actual);
         }
 
@@ -191,6 +208,10 @@ internal sealed class EfCoreEventStore(
         if (head is null || head.HardDeleted)
             throw new StreamNotFoundException(streamId);
 
+        // A truncation point past the head means "drop everything"; clamp it so the recorded boundary
+        // never runs beyond the end of the stream.
+        beforeVersion = Math.Min(beforeVersion, head.Version + 1);
+
         if (!force)
         {
             var covering = await LatestSnapshotVersionAsync(ctx, streamId, ct).ConfigureAwait(false);
@@ -203,13 +224,19 @@ internal sealed class EfCoreEventStore(
         if (beforeVersion <= head.TruncatedBefore)
             return;
 
+        // The physical delete and the head/marker update must be all-or-nothing: without a wrapping
+        // transaction, ExecuteDelete commits on its own and a later failure would leave events gone
+        // with no tombstone — the exact state the marker exists to prevent.
+        await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
         await ctx.Events
             .Where(e => e.Domain == domain && e.StreamId == streamId && e.StreamVersion < beforeVersion)
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
 
         head.TruncatedBefore = beforeVersion;
-        EmitMarker(ctx, SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion), streamId);
+        await EmitMarkerAsync(ctx, SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion), streamId, ct)
+            .ConfigureAwait(false);
         await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        await tx.CommitAsync(ct).ConfigureAwait(false);
     }
 
     public async Task DeleteStreamAsync(string streamId, DeleteMode mode, CancellationToken ct = default)
@@ -219,6 +246,14 @@ internal sealed class EfCoreEventStore(
         if (head is null || head.HardDeleted)
             throw new StreamNotFoundException(streamId);
 
+        // Deleting an already-soft-deleted stream is a no-op — don't re-emit a tombstone. A stream
+        // recreated after deletion clears IsDeleted on append, so this only skips a true repeat.
+        if (mode == DeleteMode.Soft && head.IsDeleted)
+            return;
+
+        // All-or-nothing, as with truncation: the physical deletes and the head/marker update must
+        // commit together, or a mid-op failure would strand rows with no tombstone.
+        await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
         await ctx.Events.Where(e => e.Domain == domain && e.StreamId == streamId)
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await ctx.Snapshots.Where(s => s.Domain == domain && s.StreamId == streamId)
@@ -229,8 +264,10 @@ internal sealed class EfCoreEventStore(
         if (mode == DeleteMode.Hard)
             head.HardDeleted = true;
 
-        EmitMarker(ctx, SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null);
+        await EmitMarkerAsync(ctx, SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null, ct)
+            .ConfigureAwait(false);
         await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        await tx.CommitAsync(ct).ConfigureAwait(false);
     }
 
     public async Task RedactEventAsync(
@@ -249,7 +286,8 @@ internal sealed class EfCoreEventStore(
 
         row.Data = newData.ToArray();
         row.Metadata = newMetadata?.ToArray();
-        EmitMarker(ctx, SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId);
+        await EmitMarkerAsync(ctx, SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId, ct)
+            .ConfigureAwait(false);
         await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
@@ -263,14 +301,20 @@ internal sealed class EfCoreEventStore(
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
 
         var streams = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
-        return new ScavengeReport(streams, removed);
+        var processed = options?.MaxStreams is { } max ? Math.Min(streams, max) : streams;
+        return new ScavengeReport(processed, removed);
     }
 
-    private void EmitMarker(EventStoreDbContext ctx, string eventType, object marker, string? inBandStream)
+    private async Task EmitMarkerAsync(
+        EventStoreDbContext ctx,
+        string eventType,
+        object marker,
+        string? inBandStream,
+        CancellationToken ct)
     {
         var streamId = inBandMarkers && inBandStream is not null ? inBandStream : SystemEventTypes.SystemStream;
         var head = ctx.Streams.Local.FirstOrDefault(s => s.Domain == domain && s.StreamId == streamId)
-                   ?? ctx.Streams.Find(domain, streamId);
+                   ?? await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
         if (head is null)
         {
             head = new StreamRow { Domain = domain, StreamId = streamId };

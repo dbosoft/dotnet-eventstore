@@ -57,6 +57,7 @@ internal sealed class EfCoreSnapshotStore(
 
     public async Task PruneAsync(string streamId, int keep, CancellationToken ct = default)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(keep);
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         var stale = await ctx.Snapshots
             .Where(s => s.Domain == domain && s.StreamId == streamId)

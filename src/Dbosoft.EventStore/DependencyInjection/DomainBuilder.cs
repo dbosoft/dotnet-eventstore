@@ -14,6 +14,7 @@ public sealed class DomainBuilder
 {
     private readonly List<Func<IServiceProvider, IEventUpcaster>> _upcasters = [];
     private readonly EventTypeRegistry _registry = new();
+    private bool _hasAggregateRepository;
 
     internal DomainOptions Options { get; private set; } = new();
 
@@ -106,6 +107,7 @@ public sealed class DomainBuilder
         where T : AggregateBase
     {
         var domain = Name;
+        _hasAggregateRepository = true;
 
         Services.AddScoped<IAggregateRepository<T>>(sp =>
         {
@@ -123,5 +125,19 @@ public sealed class DomainBuilder
         });
 
         return this;
+    }
+
+    /// <summary>
+    /// Rejects configurations that cannot work together. In-band markers take a version slot on the
+    /// affected stream, so combining them with an aggregate repository over the same domain would break
+    /// the aggregate's optimistic concurrency on the first destructive op. Invoked after configuration.
+    /// </summary>
+    internal void Validate()
+    {
+        if (Options.InBandMarkers && _hasAggregateRepository)
+            throw new InvalidOperationException(
+                $"Domain '{Name}' configures in-band markers together with an aggregate repository. An "
+                + "in-band marker takes a version slot on the stream and would break the aggregate's "
+                + "optimistic concurrency; keep markers on the $system stream (the default) for aggregate domains.");
     }
 }

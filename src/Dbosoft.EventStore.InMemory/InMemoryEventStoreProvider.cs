@@ -37,7 +37,8 @@ public sealed class InMemoryEventStoreProvider : IEventStoreProvider
     private InMemoryEventStore Store(string domain) =>
         _stores.GetOrAdd(domain, key =>
         {
-            var options = _options.GetValueOrDefault(key) ?? new DomainOptions();
+            if (!_options.TryGetValue(key, out var options))
+                throw new ArgumentException($"Domain '{key}' is not registered.", nameof(domain));
             return new InMemoryEventStore(_timeProvider, options.InBandMarkers, options.TombstoneRetention);
         });
 }
