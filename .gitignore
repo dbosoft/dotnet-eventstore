@@ -36,6 +36,11 @@ project.assets.json
 ## Local tooling output
 inspect*.sarif
 
+## Sample databases (SQLite files the samples create at runtime)
+*.db
+*.db-shm
+*.db-wal
+
 ## Misc
 *.tmp
 *.cache

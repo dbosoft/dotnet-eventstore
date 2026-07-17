@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Dbosoft.EventStore.Sample.IssueTracker</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Dbosoft.EventStore\Dbosoft.EventStore.csproj" />
+    <ProjectReference Include="..\..\src\Dbosoft.EventStore.EfCore.Sqlite\Dbosoft.EventStore.EfCore.Sqlite.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+</Project>
