@@ -146,7 +146,7 @@ public sealed class AzureTablesFaultInjectionTests(AzuriteContainerFixture conta
     private static async Task<List<StoredEvent>> ReadAll(AzureTablesEventStoreProvider provider, string domain)
     {
         // ATS $all is index-backed; pump the projector so the read reflects the latest events.
-        await provider.CreateIndexProjector(domain).PumpAsync();
+        await provider.CreateIndexProjector(domain).DrainAsync();
         var result = new List<StoredEvent>();
         await foreach (var e in ((IAllStreamReader)provider.GetStore(domain)).ReadAllAsync(GlobalPosition.Start))
             result.Add(e);

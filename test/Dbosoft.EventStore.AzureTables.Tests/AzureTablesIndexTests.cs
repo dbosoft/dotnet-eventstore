@@ -27,7 +27,7 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
         var projector = Provider.CreateIndexProjector(_store.Domain);
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
-        (await projector.PumpAsync()).Should().Be(5); // index v1..5
+        (await projector.DrainAsync()).Should().Be(5); // index v1..5
         await store.AppendToStreamAsync("s1", 5, Events(3)); // v6..8 remain in the tail
 
         var read = await ReadBackwards(store, "s1");
@@ -43,9 +43,9 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
         var projector = Provider.CreateIndexProjector(_store.Domain);
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
-        await projector.PumpAsync(); // index v1..5
+        await projector.DrainAsync(); // index v1..5
         await maintenance.TruncateStreamAsync("s1", 3, force: true); // remove v1, v2
-        await projector.PumpAsync(); // consume the marker → prune index rows below v3
+        await projector.DrainAsync(); // consume the marker → prune index rows below v3
 
         var read = await ReadBackwards(store, "s1");
 
@@ -61,7 +61,7 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream,
             [Event("Registered", "{\"pii\":\"secret\"}"), Event(), Event()]);
-        await projector.PumpAsync();
+        await projector.DrainAsync();
 
         var scrubbed = "{\"pii\":\"[redacted]\"}"u8.ToArray();
         await maintenance.RedactEventAsync("s1", 1, scrubbed);
@@ -86,11 +86,31 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
         // Eventually consistent: nothing is in $all until the projector indexes it.
         (await ReadAll(reader)).Should().BeEmpty();
 
-        await projector.PumpAsync();
+        await projector.DrainAsync();
 
         var all = await ReadAll(reader);
         all.Select(e => e.StreamId).Should().Equal("a", "a", "b", "b");
         all.Select(e => e.Position).Should().BeInAscendingOrder();
+    }
+
+    [Fact]
+    public async Task The_safety_window_holds_fresh_events_until_they_age_out()
+    {
+        var store = Provider.GetStore(_store.Domain);
+        var reader = (IAllStreamReader)store;
+        // A large window so freshly-appended events are always "too fresh" for a windowed pump — the same
+        // hold that stops the projector from checkpointing past a position whose lower sibling is still in
+        // flight, which is what would otherwise skip that sibling permanently.
+        var projector = Provider.CreateIndexProjector(_store.Domain, safetyWindow: TimeSpan.FromHours(1));
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+
+        (await projector.PumpAsync()).Should().Be(0); // within the window → held, checkpoint not advanced
+        (await ReadAll(reader)).Should().BeEmpty();
+
+        // Draining (or, in production, the window elapsing) indexes them once no lower sibling can be pending.
+        (await projector.DrainAsync()).Should().Be(3);
+        (await ReadAll(reader)).Select(e => e.StreamVersion).Should().Equal(1, 2, 3);
     }
 
     private static async Task<List<StoredEvent>> ReadAll(IAllStreamReader reader)

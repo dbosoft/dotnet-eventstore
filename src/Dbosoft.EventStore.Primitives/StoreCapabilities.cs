@@ -19,10 +19,11 @@ public enum StoreCapabilities
     /// event that commits below the point already returned. A provider declares it only when a position is
     /// not assigned before the commit that makes the event visible (the in-memory store, whose append is
     /// atomic under one lock). Without this flag, positions are handed out before commit, so an event can
-    /// become visible <i>below</i> a position a reader has already passed — a forward-only reader misses it
-    /// permanently. De-duplicating by <see cref="StoredEvent.EventId"/> only removes duplicates from a
-    /// re-read; it does not recover a miss. A consumer needing completeness on such a store must re-read
-    /// from behind its checkpoint (and dedupe the overlap); nothing in the store does that automatically.
+    /// become visible <i>below</i> a position a reader has already passed — a naive forward-only reader
+    /// would miss it. A consumer therefore needs a bounded safety window (deliver only events older than
+    /// the window, so an in-flight lower sibling is not skipped) to be complete on such a store; the core
+    /// subscription applies one, at the price of that much staleness, and de-duplicating by
+    /// <see cref="StoredEvent.EventId"/> makes the window's overlapping re-reads idempotent.
     /// </summary>
     ExactCatchup = 1 << 0,
 

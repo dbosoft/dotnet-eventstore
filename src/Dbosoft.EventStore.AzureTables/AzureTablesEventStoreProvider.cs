@@ -57,15 +57,25 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
                 _timeProvider, options.InBandMarkers, options.TombstoneRetention);
         });
 
+    /// <summary>The default safety window: the projector holds events newer than this before indexing them,
+    /// so an append whose position was allocated but not yet committed is not skipped. See the projector.</summary>
+    public static readonly TimeSpan DefaultIndexSafetyWindow = TimeSpan.FromSeconds(5);
+
     /// <summary>
     /// Creates an index projector for a domain — run it (e.g. as a hosted service) to keep the domain's
-    /// per-stream descending index current, which makes backward stream reads a server-side range scan.
+    /// per-stream descending and <c>$all</c> indexes current. It holds events newer than
+    /// <paramref name="safetyWindow"/> (default <see cref="DefaultIndexSafetyWindow"/>) so an append whose
+    /// position was allocated but not yet committed is not skipped.
     /// </summary>
-    public AzureTablesIndexProjector CreateIndexProjector(string domain, string checkpointName = "azure-tables-index")
+    public AzureTablesIndexProjector CreateIndexProjector(
+        string domain,
+        string checkpointName = "azure-tables-index",
+        TimeSpan? safetyWindow = null)
     {
         OptionsFor(domain); // validate the domain is registered
         return new AzureTablesIndexProjector(
-            (AzureTablesEventStore)GetStore(domain), IndexTable(domain), AllIndexTable(domain), Checkpoints, $"{domain}:{checkpointName}");
+            (AzureTablesEventStore)GetStore(domain), IndexTable(domain), AllIndexTable(domain), Checkpoints,
+            $"{domain}:{checkpointName}", _timeProvider, safetyWindow ?? DefaultIndexSafetyWindow);
     }
 
     /// <inheritdoc />

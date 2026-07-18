@@ -149,16 +149,15 @@ advancing to the max position can skip an event that was assigned an earlier pos
 later. The reader needs a **watermark** — never advance past a point somebody could still write
 below.
 
-> **Implementation status (v1): the watermark is designed here but NOT yet built.** Neither the gap
-> detection nor the safety window below is implemented. `EfCoreEventStore.ReadAllAsync` is a plain
-> `WHERE Position > from ORDER BY Position`, and `AzureTablesIndexProjector` advances its checkpoint to
-> the highest position it has seen. So on EF Core and ATS a catch-up **can permanently miss** an event
-> whose position was assigned before a commit that lands after the reader has passed that position — and
-> on ATS, because `$all` is served from the projector-built index, the missed event never appears in
-> `$all` at all until the projector's checkpoint is reset. `ExactCatchup` correctly advertises the
-> absence of this guarantee; the mechanisms below are the planned fix, and de-duplication alone does not
-> substitute for them (a miss is not a duplicate). This is the top known limitation, tracked for a
-> follow-up.
+> **Implementation status (v1): a time-based safety window is built; the gap detection below is not.**
+> The realized mechanism is a **safety window** — deliver/index only events older than a window Δ, so an
+> event whose position was allocated but whose commit lands late is not passed before its lower siblings
+> commit. It lives in the `AzureTablesIndexProjector` (holds fresh events out of the `$all` index) and in
+> the core `EventStoreSubscription` (holds fresh events on any non-`ExactCatchup` store, e.g. EF Core).
+> This closes the miss **provided no append stays uncommitted longer than Δ** — the one honesty caveat on
+> the flag (below). Not yet built: the lower-latency **gap detection** below, which waits only on an
+> actual hole instead of paying Δ on every read, and which needs a dense per-domain sequence EF Core does
+> not yet have. So the miss is fixed at the cost of Δ staleness; removing that cost is the future work.
 
 The mechanism differs by provider:
 
@@ -201,11 +200,12 @@ separate store instance per domain, so its sequence is gap-free) and declares `E
 shipped EF Core layout does **not**: domains are an indexed discriminator over one `es_events` table
 with one shared identity column (§5), so a single domain's positions are sparse — the gaps are other
 domains' events, indistinguishable from missing ones. EF Core therefore does **not** declare
-`ExactCatchup` in v1; its catch-up reads are ordered, but — with the watermark unbuilt (see the status
-note above) — not complete under concurrent out-of-order commits, so a consumer can miss an event, not
-merely receive a duplicate. Restoring density (per-domain sequences, or table-per-domain) plus gap
-detection is the path to the flag on EF Core, and is left as a later option. ATS never had a dense
-sequence and does not declare it.
+`ExactCatchup` in v1; its raw catch-up reads are ordered but not complete under concurrent out-of-order
+commits, so a consumer must take the loss into account — which the core subscription does with the
+safety window (status note above), delivering only events older than Δ so none is skipped. That buys
+completeness under bounded commit latency without the flag; earning the flag itself (no Δ staleness)
+needs density (per-domain sequences, or table-per-domain) plus gap detection, left as a later option.
+ATS never had a dense sequence and does not declare it either.
 
 ### D4 — The core only knows bytes
 
@@ -522,11 +522,11 @@ partitions than the event, so no EGT spans
 both — Microsoft's *eventually consistent transactions pattern*, the projector being the "written
 idempotently after" step. If the projector never runs, backward reads fall back to the events-table
 scan and `$all` is empty until it does — never blocking a write.
-**Completeness caveat:** the projector advances its checkpoint to the highest position it has seen and
-has no safety window (D3, status note), so an append whose tick was allocated before a later-committing
-sibling can be skipped permanently. Until the safety window is built, treat ATS `$all` as complete only
-outside the concurrent-append window; a full index rebuild (reset the projector checkpoint) recovers a
-missed event, since the events table itself never loses it.
+**Completeness:** the projector holds events newer than a safety window Δ before indexing them (D3,
+status note), so an append whose tick was allocated before a later-committing sibling is not skipped —
+provided no append stays uncommitted longer than Δ. `DrainAsync` ignores the window for a controlled
+drain (tests, or shutdown after writers stop). Should an append ever outlive Δ, the events table still
+has the event, so a full index rebuild (reset the projector checkpoint) recovers it.
 
 **Alternatives considered and rejected (for a dense global sequence):**
 

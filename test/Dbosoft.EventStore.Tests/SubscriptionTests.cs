@@ -169,6 +169,36 @@ public sealed class SubscriptionTests
     }
 
     [Fact]
+    public async Task A_non_exact_store_holds_events_inside_the_safety_window()
+    {
+        var clock = new MutableClock(new DateTimeOffset(2026, 6, 1, 0, 0, 0, TimeSpan.Zero));
+        var events = Enumerable.Range(1, 3)
+            .Select(i => new StoredEvent(
+                "s1", i, GlobalPosition.FromSequence(i), Guid.NewGuid(), "TestEvent",
+                ReadOnlyMemory<byte>.Empty, null, "application/json", clock.Now))
+            .ToList();
+        var store = new ScriptedStore(StoreCapabilities.None) { Script = events }; // not exact-catch-up
+        var handled = 0;
+        var subscription = new EventStoreSubscription(
+            store, new InMemoryCheckpointStore(), "sub",
+            (_, _) =>
+            {
+                handled++;
+                return Task.CompletedTask;
+            },
+            new SubscriptionOptions { SafetyWindow = TimeSpan.FromHours(1), TimeProvider = clock });
+
+        // Recorded "now", inside the 1h window → held, checkpoint not advanced.
+        (await subscription.PumpAsync()).Should().Be(0);
+        handled.Should().Be(0);
+
+        // Once they age past the window, they are delivered.
+        clock.Advance(TimeSpan.FromHours(2));
+        (await subscription.PumpAsync()).Should().Be(3);
+        handled.Should().Be(3);
+    }
+
+    [Fact]
     public void A_non_positive_de_duplication_window_is_rejected()
     {
         var store = new ScriptedStore(StoreCapabilities.None);

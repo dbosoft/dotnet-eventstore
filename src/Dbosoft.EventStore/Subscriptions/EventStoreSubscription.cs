@@ -14,13 +14,13 @@ namespace Dbosoft.EventStore.Subscriptions;
 /// subscription simply forwards each event and advances the checkpoint (the fast path).
 /// </item>
 /// <item>
-/// Without it, a catch-up read is only complete up to a bounded-staleness window: an event can commit
-/// below a position this subscription has already passed and be missed, because the pump advances the
-/// checkpoint to the highest position seen and never rewinds on its own. De-duplicating by
-/// <see cref="StoredEvent.EventId"/> over a bounded window (<see cref="SubscriptionOptions.DeduplicationWindow"/>)
-/// makes a re-read idempotent, but it does <b>not</b> recover a miss. For completeness on a non-exact
-/// store the host must periodically re-create the subscription from an earlier checkpoint (rewound by more
-/// than the store's staleness window); the dedup window is what makes that overlap safe.
+/// Without it, positions are assigned before the commit that makes an event visible, so a naive forward
+/// reader could skip an event that commits below a position it has already passed. The subscription
+/// prevents that with a <see cref="SubscriptionOptions.SafetyWindow"/>: it does not deliver or checkpoint
+/// past an event recorded more recently than the window, so a not-yet-committed lower sibling is never
+/// skipped — completeness holds provided no append stays uncommitted longer than the window (the price is
+/// that much delivery latency). De-duplication by <see cref="StoredEvent.EventId"/> over a bounded window
+/// (<see cref="SubscriptionOptions.DeduplicationWindow"/>) makes the re-reads across that overlap idempotent.
 /// </item>
 /// </list>
 /// Requires the store to support <c>$all</c> reads (<see cref="IAllStreamReader"/>); constructing a
@@ -72,6 +72,7 @@ public sealed class EventStoreSubscription
         _options = options ?? new SubscriptionOptions();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_options.DeduplicationWindow, nameof(SubscriptionOptions.DeduplicationWindow));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_options.PollInterval.Ticks, nameof(SubscriptionOptions.PollInterval));
+        ArgumentOutOfRangeException.ThrowIfNegative(_options.SafetyWindow.Ticks, nameof(SubscriptionOptions.SafetyWindow));
 
         _reader = reader;
         _checkpoints = checkpoints;
@@ -122,8 +123,18 @@ public sealed class EventStoreSubscription
             var moved = false;
             var dispatched = 0;
 
+            // On a non-exact store, do not advance past an event newer than the safety horizon: a
+            // lower-positioned sibling may still be in flight and would be skipped. On an exact store the
+            // horizon is open (events are complete by position).
+            var horizon = _exactCatchup
+                ? DateTimeOffset.MaxValue
+                : _options.TimeProvider.GetUtcNow() - _options.SafetyWindow;
+
             await foreach (var stored in _reader.ReadAllAsync(from, ct: ct).ConfigureAwait(false))
             {
+                if (stored.CreatedAt > horizon)
+                    break; // too fresh; hold it (and everything after) for a later pump
+
                 if (_exactCatchup || !AlreadySeen(stored.EventId))
                 {
                     await _handler(stored, ct).ConfigureAwait(false);

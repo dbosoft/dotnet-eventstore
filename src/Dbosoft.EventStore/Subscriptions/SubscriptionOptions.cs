@@ -18,6 +18,16 @@ public sealed record SubscriptionOptions
     /// <summary>How long <see cref="EventStoreSubscription.RunAsync"/> waits after an empty pump before polling again.</summary>
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(1);
 
+    /// <summary>
+    /// On a store <b>without</b> <see cref="StoreCapabilities.ExactCatchup"/>, the subscription does not
+    /// deliver (or checkpoint past) an event recorded more recently than this — an event whose position was
+    /// assigned but whose commit may not yet be visible could have a lower-positioned sibling still in
+    /// flight, and delivering past it would skip that sibling permanently. The window trades bounded
+    /// staleness for completeness, and holds provided no append stays uncommitted longer than it. Ignored
+    /// on an exact-catch-up store, which needs no window. Must be non-negative.
+    /// </summary>
+    public TimeSpan SafetyWindow { get; init; } = TimeSpan.FromSeconds(5);
+
     /// <summary>Clock used for the poll delay; defaults to the system clock. Injected for testing.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 }

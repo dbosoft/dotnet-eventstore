@@ -22,32 +22,60 @@ public sealed class AzureTablesIndexProjector
     private readonly TableClient _allIndex;
     private readonly ICheckpointStore _checkpoints;
     private readonly string _checkpointName;
+    private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _safetyWindow;
 
     internal AzureTablesIndexProjector(
         AzureTablesEventStore store,
         TableClient index,
         TableClient allIndex,
         ICheckpointStore checkpoints,
-        string checkpointName)
+        string checkpointName,
+        TimeProvider timeProvider,
+        TimeSpan safetyWindow)
     {
         _store = store;
         _index = index;
         _allIndex = allIndex;
         _checkpoints = checkpoints;
         _checkpointName = checkpointName;
+        _timeProvider = timeProvider;
+        _safetyWindow = safetyWindow;
     }
 
-    /// <summary>Indexes every event after the saved checkpoint, then advances it. Returns how many were indexed.</summary>
-    public async Task<int> PumpAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Indexes events after the saved checkpoint that are older than the safety window, then advances the
+    /// checkpoint. Returns how many were indexed. A position is allocated before the append commits, so an
+    /// event whose position is newer than the horizon may have a not-yet-committed lower sibling; holding
+    /// it (and not advancing past it) until it ages out of the window prevents that sibling from being
+    /// skipped permanently. Events newer than the horizon are left for a later pump.
+    /// </summary>
+    public Task<int> PumpAsync(CancellationToken ct = default) => PumpCoreAsync(applySafetyWindow: true, ct);
+
+    /// <summary>
+    /// Indexes everything currently available, ignoring the safety window. Only safe when no append is in
+    /// flight (a controlled drain, e.g. tests or shutdown after writers have stopped); otherwise use
+    /// <see cref="PumpAsync"/>.
+    /// </summary>
+    public Task<int> DrainAsync(CancellationToken ct = default) => PumpCoreAsync(applySafetyWindow: false, ct);
+
+    private async Task<int> PumpCoreAsync(bool applySafetyWindow, CancellationToken ct)
     {
         var from = await _checkpoints.GetAsync(_checkpointName, ct).ConfigureAwait(false) ?? GlobalPosition.Start;
+        var horizon = applySafetyWindow
+            ? GlobalPosition.FromSequence(Math.Max(0, (_timeProvider.GetUtcNow() - _safetyWindow).UtcTicks))
+            : GlobalPosition.End;
         var last = from;
         var count = 0;
 
         // Tail the strongly-consistent source scan (not the store's index-backed ReadAllAsync, which this
-        // projector is what fills).
+        // projector is what fills). The scan yields in ascending position order, so the first event past the
+        // horizon means every later one is too — stop and leave them for a later pump.
         await foreach (var stored in _store.ScanAllAsync(from, ct).ConfigureAwait(false))
         {
+            if (stored.Position > horizon)
+                break;
+
             await _index.UpsertEntityAsync(
                     TableSchema.IndexEntity(stored.StreamId, stored.StreamVersion), TableUpdateMode.Replace, ct)
                 .ConfigureAwait(false);
