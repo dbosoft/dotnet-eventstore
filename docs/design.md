@@ -448,35 +448,43 @@ Tested against SQLite, SQL Server and PostgreSQL (Testcontainers).
 
 ## 6. Provider: Azure Table Storage
 
+**Domain = its own tables.** Unlike a relational schema, ATS tables are cheap to create and drop, so
+each domain gets its **own** events and snapshots tables (plus a blob container, below) rather than a
+shared discriminator — a domain is a self-contained unit that can be dropped whole. Table names are
+`{prefix}{domain}Events` / `…Snapshots`; a domain that is not a legal table-name fragment is mapped
+to a stable hash. The checkpoint table is shared (the checkpoint store is one domain-agnostic service).
+
 **Core (clean and atomic):**
 - PartitionKey = `StreamId`, RowKey = `"E" + version.ToString("D19")`.
-- A `HEAD` entity in the same partition holds the current version.
+- A `HEAD` entity in the same partition holds the current version and lifecycle flags.
 - Append = **a single Entity Group Transaction**: check-and-bump `HEAD` via ETag plus insert the
   event rows. All in one partition, therefore atomic. Limit: 100 entities per EGT, so at most 99
-  events per append.
+  events per append (over that: a clear exception). A lost race is an ETag / entity-exists conflict,
+  re-read and classified exactly as the relational provider does.
 - Reading a stream = a range query on RowKey prefix `"E"`. One partition scan, fast and cheap.
 
 **Snapshots:** separate table, PK = `StreamId`, RowKey = `(long.MaxValue - version).ToString("D19")`,
 so the newest snapshot is the first row.
 
-**`$all` via the log tail pattern:**
+**`$all` — shipped as a scan; the log-tail index is the scale optimization.** ATS reads are strongly
+consistent, so the simplest correct `$all` is a scan of the domain's events table (skip HEAD rows),
+ordered by a `Position` property — a **per-process monotonic tick** allocated at append, so a single
+process produces strictly increasing, totally-ordered positions. This is what ships. It is *correct*
+and passes the whole conformance suite; its cost is scanning the domain's events per `$all` read.
 
-- **Forward** ticks in the RowKey, not reverse: ATS only sorts ascending, and a catch-up reader
-  wants oldest-first from a checkpoint. Reverse ticks (`MaxValue.Ticks - now`) stay for "the N most
-  recent" / tailing the head.
+The **log-tail index** below removes that cost and is the planned optimization — a separate, sharded,
+time-bucketed index so `$all` is a bounded merge instead of a scan:
+
+- **Forward** ticks in the RowKey (ATS sorts ascending; a catch-up reader wants oldest-first).
 - **Stamp the tick late and re-stamp on retry**, to keep Δ small (D3).
-- **Sharded buckets, not a single `$all` key.** PartitionKey combines a time bucket with a shard
-  (e.g. `"2026-07-17T14/03"`); the reader merges N tick-ordered buckets on read. The MS docs
-  warn explicitly about the log tail pattern: *"be careful not to create hot spot partitions"*.
-  Cost is a merge loop in the reader.
-- **Atomicity:** the index entry necessarily lives in a different partition than the event, so no
-  EGT spans both. The answer is Microsoft's own *eventually consistent transactions pattern*: the
-  stream partition is the source of truth, the `$all` entry is written idempotently afterwards
-  (insert-or-replace keyed by EventId), and a repair sweep closes the crash window. The docs are
-  explicit: *"This solution does not provide for transaction isolation… The data will be consistent
-  eventually."*
+- **Sharded buckets, not a single `$all` key** (PartitionKey = time bucket + shard); the reader merges
+  N tick-ordered buckets. MS warns about the log-tail hot-spot; the cost is a merge loop.
+- **Atomicity:** the index entry lives in a different partition than the event, so no EGT spans both —
+  Microsoft's *eventually consistent transactions pattern* (stream partition is the truth, index
+  written idempotently after, a repair sweep closes the crash window). Because it is not dense either,
+  it does **not** buy `ExactCatchup`; it buys read efficiency.
 
-**Alternatives considered and rejected:**
+**Alternatives considered and rejected (for a dense global sequence):**
 
 | Alternative | Why not |
 |---|---|
@@ -486,13 +494,24 @@ so the newest snapshot is the first row.
 | Queue / Event Hubs as the ordering channel | Pulls in an external service dependency we explicitly do not want, and only solves the *live* case — a historical `ReadAllAsync(from: T)` still needs the table index, so you end up with both. |
 | No `$all` on ATS at all | The honest fallback: per-stream reads only. Costs cross-stream read models on ATS entirely. Kept in reserve if the index proves unworkable. |
 
-⇒ ATS declares `AllStreamReads | TimeNavigation`, but **not**
-`MultiStreamAtomicAppend` and **not** `ExactCatchup`.
+⇒ ATS declares `AllStreamReads | TimeNavigation | Truncation | StreamDeletion | SnapshotHistory |
+Redaction` — the same set as the relational provider — but **not** `MultiStreamAtomicAppend` and
+**not** `ExactCatchup` (the monotonic position is per-process, so consumers de-duplicate by `EventId`).
 
-**Payloads over 64 KB:** chunked across several properties (`Data0..DataN`) up to the 1 MB entity
-limit. Beyond that, v1 throws a clear exception; blob overflow is an optional later addition.
+**Large payloads → blobs.** Each domain has a blob container. A payload field small enough stays inline
+in the entity; a field over the inline limit is written to a blob and the entity keeps a reference, so
+there is no entity-size ceiling. Reads resolve the reference transparently; truncate/delete remove the
+blobs, redaction overwrites them.
 
-Tested against Azurite.
+**Markers are cross-partition, so at-least-once.** A destructive op commits atomically in the stream
+partition, but its `$system` marker is a separate append to a different partition — no EGT spans both.
+The op records a marker watermark on the HEAD only *after* the marker lands, so a crash or failure in
+between re-emits the marker on retry rather than losing it; markers apply idempotently, so a duplicate
+is harmless. A read likewise tolerates a payload blob a concurrent delete already removed by skipping
+that event.
+
+Tested against Azurite: the full conformance suite plus large-payload and fault-injection tests
+(a lost marker recovered on retry, a vanished blob skipped).
 
 ## 7. Deletion, truncation, retention, redaction — and their markers
 
