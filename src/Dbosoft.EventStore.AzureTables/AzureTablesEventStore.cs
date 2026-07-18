@@ -147,6 +147,7 @@ internal sealed class AzureTablesEventStore(
         long maxCount = long.MaxValue,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        EnsureValidStreamId(streamId);
         var take = Clamp(maxCount);
         if (take == 0)
             yield break;
@@ -236,6 +237,7 @@ internal sealed class AzureTablesEventStore(
 
     public async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
     {
+        EnsureValidStreamId(streamId);
         var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
         return head is null || TableSchema.HeadHardDeleted(head)
             ? null
@@ -249,6 +251,7 @@ internal sealed class AzureTablesEventStore(
 
     public async Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default)
     {
+        EnsureValidStreamId(streamId);
         var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
         return head is null || TableSchema.HeadHardDeleted(head)
             ? null
@@ -304,32 +307,55 @@ internal sealed class AzureTablesEventStore(
         var forwards = direction == ReadDirection.Forwards;
         var bucket = TableSchema.AllIndexBucket(from);
         var filter = forwards ? $"PartitionKey ge '{bucket}'" : $"PartitionKey le '{bucket}'";
+        var count = 0;
 
-        var rows = new List<TableEntity>();
-        await foreach (var index in allIndexTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+        if (forwards)
         {
-            var compare = string.CompareOrdinal(index.RowKey, from.Token);
-            if (forwards ? compare > 0 : compare < 0)
-                rows.Add(index);
+            // Index rows arrive in (bucket, position) = ascending global order, so stream directly and stop
+            // at maxCount — a bounded read dereferences only the rows it returns, never the whole tail.
+            await foreach (var index in allIndexTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+            {
+                if (string.CompareOrdinal(index.RowKey, from.Token) <= 0)
+                    continue;
+                if (await DereferenceAllIndexAsync(index, ct).ConfigureAwait(false) is not { } stored)
+                    continue;
+                yield return stored;
+                if (++count >= take)
+                    yield break;
+            }
+
+            yield break;
         }
 
-        // Rows arrive in (bucket, position) order = global position order; reverse for a backward read.
-        if (!forwards)
-            rows.Reverse();
+        // Backward: Table Storage has no server-side descending order, so buffer the matching index rows to
+        // reverse them, then dereference.
+        var rows = new List<TableEntity>();
+        await foreach (var index in allIndexTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+            if (string.CompareOrdinal(index.RowKey, from.Token) < 0)
+                rows.Add(index);
+        rows.Reverse();
 
-        var count = 0;
         foreach (var index in rows)
         {
-            var (streamId, version) = TableSchema.AllIndexTarget(index);
-            var response = await eventsTable
-                .GetEntityIfExistsAsync<TableEntity>(streamId, TableSchema.EventRowKey(version), cancellationToken: ct)
-                .ConfigureAwait(false);
-            if (!response.HasValue || await TryMaterializeAsync(response.Value!, ct).ConfigureAwait(false) is not { } stored)
+            if (await DereferenceAllIndexAsync(index, ct).ConfigureAwait(false) is not { } stored)
                 continue;
             yield return stored;
             if (++count >= take)
                 yield break;
         }
+    }
+
+    // Resolves a $all index row to its live event, or null if the event is gone (truncated/deleted since
+    // the row was written — the row is stale and skipped; versions are never reused, so it never aliases).
+    private async Task<StoredEvent?> DereferenceAllIndexAsync(TableEntity index, CancellationToken ct)
+    {
+        var (streamId, version) = TableSchema.AllIndexTarget(index);
+        var response = await eventsTable
+            .GetEntityIfExistsAsync<TableEntity>(streamId, TableSchema.EventRowKey(version), cancellationToken: ct)
+            .ConfigureAwait(false);
+        return response.HasValue
+            ? await TryMaterializeAsync(response.Value!, ct).ConfigureAwait(false)
+            : null;
     }
 
     // A strongly-consistent forward scan of the domain's events in position order — the source of truth
@@ -376,6 +402,7 @@ internal sealed class AzureTablesEventStore(
         bool force = false,
         CancellationToken ct = default)
     {
+        EnsureValidStreamId(streamId);
         for (var attempt = 1; ; attempt++)
         {
             var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
@@ -431,6 +458,7 @@ internal sealed class AzureTablesEventStore(
 
     public async Task DeleteStreamAsync(string streamId, DeleteMode mode, CancellationToken ct = default)
     {
+        EnsureValidStreamId(streamId);
         for (var attempt = 1; ; attempt++)
         {
             var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
@@ -483,6 +511,7 @@ internal sealed class AzureTablesEventStore(
         ReadOnlyMemory<byte>? newMetadata = null,
         CancellationToken ct = default)
     {
+        EnsureValidStreamId(streamId);
         for (var attempt = 1; ; attempt++)
         {
             var response = await eventsTable

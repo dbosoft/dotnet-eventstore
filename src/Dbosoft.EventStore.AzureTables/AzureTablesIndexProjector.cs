@@ -102,12 +102,32 @@ public sealed class AzureTablesIndexProjector
                 // Version < boundary reverses to a row key greater than the boundary's key.
                 await DeleteIndexAsync(truncated.StreamId, $"RowKey gt '{TableSchema.IndexRowKey(truncated.BeforeVersion)}'", ct)
                     .ConfigureAwait(false);
+                await PruneAllIndexAsync(truncated.StreamId, truncated.BeforeVersion, ct).ConfigureAwait(false);
                 break;
             case SystemEventTypes.StreamDeleted:
                 var deleted = JsonSerializer.Deserialize<StreamDeletedMarker>(marker.Data.Span, Json)!;
                 await DeleteIndexAsync(deleted.StreamId, rowKeyPredicate: null, ct).ConfigureAwait(false);
+                await PruneAllIndexAsync(deleted.StreamId, beforeVersion: null, ct).ConfigureAwait(false);
                 break;
         }
+    }
+
+    // Removes a stream's rows from the $all index — those below beforeVersion for a truncation, or all of
+    // them for a deletion. The $all index is partitioned by time bucket, not by stream, so the rows are
+    // found by a StreamId property filter and deleted grouped by their partition (an EGT is per-partition).
+    private async Task PruneAllIndexAsync(string streamId, long? beforeVersion, CancellationToken ct)
+    {
+        var filter = $"StreamId eq '{streamId.Replace("'", "''")}'"
+                     + (beforeVersion is { } v ? $" and Version lt {v}" : "");
+        var stale = new List<TableEntity>();
+        await foreach (var entity in _allIndex.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+            stale.Add(entity);
+
+        foreach (var partition in stale.GroupBy(e => e.PartitionKey))
+            foreach (var chunk in partition.Chunk(100))
+                await _allIndex.SubmitTransactionAsync(
+                        chunk.Select(e => new TableTransactionAction(TableTransactionActionType.Delete, e, e.ETag)), ct)
+                    .ConfigureAwait(false);
     }
 
     private async Task DeleteIndexAsync(string streamId, string? rowKeyPredicate, CancellationToken ct)

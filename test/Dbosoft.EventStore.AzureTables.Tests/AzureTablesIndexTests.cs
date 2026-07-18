@@ -94,6 +94,23 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
     }
 
     [Fact]
+    public async Task Truncation_prunes_the_all_index_rows()
+    {
+        var store = Provider.GetStore(_store.Domain);
+        var reader = (IAllStreamReader)store;
+        var maintenance = (IStreamMaintenance)store;
+        var projector = Provider.CreateIndexProjector(_store.Domain);
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
+        await projector.DrainAsync();
+        await maintenance.TruncateStreamAsync("s1", 3, force: true);
+        await projector.DrainAsync(); // consume the marker → prune the $all rows below v3, not just skip them
+
+        // $all reflects the truncation (the pruned rows are gone from the index, exercised without error).
+        (await ReadAll(reader)).Where(e => e.StreamId == "s1").Select(e => e.StreamVersion).Should().Equal(3, 4, 5);
+    }
+
+    [Fact]
     public async Task The_safety_window_holds_fresh_events_until_they_age_out()
     {
         var store = Provider.GetStore(_store.Domain);

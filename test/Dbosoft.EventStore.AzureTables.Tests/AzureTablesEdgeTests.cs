@@ -42,10 +42,19 @@ public sealed class AzureTablesEdgeTests(AzuriteContainerFixture container) : IA
     public async Task A_stream_id_with_a_reserved_key_character_is_rejected_clearly()
     {
         var store = _store.Provider.GetStore(_store.Domain);
+        var maintenance = (IStreamMaintenance)store;
+        const string bad = "orders/42";
 
-        var act = () => store.AppendToStreamAsync("orders/42", ExpectedVersion.NoStream, Events(1));
-
-        await act.Should().ThrowAsync<NotSupportedByProviderException>();
+        // Every entry point that takes a stream id rejects an id Azure cannot key on, with the clear
+        // provider exception rather than a raw storage/filter error — reads and maintenance, not just append.
+        await ((Func<Task>)(() => store.AppendToStreamAsync(bad, ExpectedVersion.NoStream, Events(1))))
+            .Should().ThrowAsync<NotSupportedByProviderException>();
+        await ((Func<Task>)(() => ReadStream(store, bad))).Should().ThrowAsync<NotSupportedByProviderException>();
+        await ((Func<Task>)(() => store.GetStreamInfoAsync(bad))).Should().ThrowAsync<NotSupportedByProviderException>();
+        await ((Func<Task>)(() => maintenance.TruncateStreamAsync(bad, 1, force: true)))
+            .Should().ThrowAsync<NotSupportedByProviderException>();
+        await ((Func<Task>)(() => maintenance.DeleteStreamAsync(bad, DeleteMode.Soft)))
+            .Should().ThrowAsync<NotSupportedByProviderException>();
     }
 
     [Fact]
