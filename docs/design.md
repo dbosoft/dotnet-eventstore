@@ -78,10 +78,11 @@ Symmetry is explicitly a non-goal. Each provider uses the best mechanism its sto
 capability model names the difference instead of hiding it — along **two axes**:
 
 - **Whether an operation is *available*** is a structural fact carried by the **type system**: a
-  provider supports global reads, time navigation, truncation, deletion or redaction iff it implements
-  `IAllStreamReader`, `ITimeNavigable`, `ITruncatable`, `IStreamDeletable`, `IRedactable`. A caller
-  branches with an `is`-cast; a partially-supported operation throws `NotSupportedByProviderException`.
-  No flag restates what the type already says.
+  provider supports global reads, time navigation, truncation, deletion, redaction, multi-stream atomic
+  append or stream metadata iff it implements `IAllStreamReader`, `ITimeNavigable`, `ITruncatable`,
+  `IStreamDeletable`, `IRedactable`, `IMultiStreamAppend`, `IStreamMetadataStore`. A caller branches with
+  an `is`-cast; a partially-supported operation throws `NotSupportedByProviderException`. No flag restates
+  what the type already says.
 - **How an available operation *behaves*** is what the `StoreCapabilities` flags carry — the guarantees
   a type cannot express (is a catch-up read exact? is more than the latest snapshot kept?). A flag
   earns its place only where a consumer branches on it: a faster path, a costlier-but-correct path, or
@@ -322,24 +323,27 @@ public enum StoreCapabilities
 
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
     SnapshotHistory = 1 << 1,
-
-    /// <summary>Reserved: readable/writable stream metadata; no metadata API exists yet.</summary>
-    StreamMetadata = 1 << 2,
 }
 ```
 
-The consumer of `ExactCatchup` is the core `EventStoreSubscription`: with the flag it forwards each event
-and advances its checkpoint; without it, it de-duplicates by `EventId` so re-reads are idempotent — the
-"faster path vs. costlier-but-correct path" the flags exist for. `SnapshotHistory` is consumed by the
-aggregate repository's fall-back-through-older-snapshots loop.
+Only two flags remain — the behavioural guarantees no interface can express. The consumer of
+`ExactCatchup` is the core `EventStoreSubscription`: with the flag it forwards each event and advances its
+checkpoint; without it, it de-duplicates by `EventId` so re-reads are idempotent — the "faster path vs.
+costlier-but-correct path" the flags exist for. `SnapshotHistory` is consumed by the aggregate
+repository's fall-back-through-older-snapshots loop.
 
-**Multi-stream atomic append** is an availability interface, not a flag: a store implements
-`IMultiStreamAppend` (one `AppendToStreamsAsync` that commits several streams all-or-nothing) iff its
-backend can. EF Core does it in one transaction and the in-memory store under its single lock;
-partition-per-stream ATS cannot, so it does not implement it. Its consumer is
-`IAggregateRepository.SaveAllAsync`, which persists several aggregates atomically and throws
-`NotSupportedByProviderException` on a store that lacks the interface rather than silently degrading to a
-non-atomic loop.
+Everything else is an **availability interface**, not a flag — a provider implements it iff its backend
+supports it:
+
+- **`IMultiStreamAppend`** — one `AppendToStreamsAsync` that commits several streams all-or-nothing. EF
+  Core does it in one transaction and the in-memory store under its single lock; partition-per-stream ATS
+  cannot, so it does not implement it. Its consumer is `IAggregateRepository.SaveAllAsync`, which persists
+  several aggregates atomically and throws `NotSupportedByProviderException` on a store that lacks it
+  rather than silently degrading to a non-atomic loop.
+- **`IStreamMetadataStore`** — per-stream `StreamMetadata` (a retention policy — max event count, max age —
+  plus custom key/values), stored on the stream head. Its consumer is the retention pass of `ScavengeAsync`:
+  with retention enabled it force-truncates each stream to its policy (emitting the truncation marker), so
+  every provider that has metadata also enforces it. All three provider families implement it.
 
 The core interface, implemented by every provider:
 

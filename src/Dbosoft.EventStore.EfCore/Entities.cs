@@ -14,6 +14,9 @@ internal sealed class StreamRow
     public long TruncatedBefore { get; set; } = 1;
     public bool IsDeleted { get; set; }
     public bool HardDeleted { get; set; }
+
+    /// <summary>Serialized <see cref="StreamMetadata"/> (JSON), or <c>null</c> when none is set.</summary>
+    public string? Metadata { get; set; }
 }
 
 /// <summary>A stored event. <see cref="Position"/> is the database-assigned global sequence.</summary>

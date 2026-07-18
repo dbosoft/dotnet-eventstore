@@ -23,7 +23,7 @@ internal sealed class AzureTablesEventStore(
     TimeProvider timeProvider,
     bool inBandMarkers,
     TimeSpan tombstoneRetention)
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance
+    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IStreamMetadataStore
 {
     // A single entity-group transaction holds at most 100 entities; one is the HEAD, so at most 99
     // events per append.
@@ -244,7 +244,48 @@ internal sealed class AzureTablesEventStore(
                 TableSchema.HeadVersion(head),
                 TableSchema.HeadTruncatedBefore(head),
                 TableSchema.HeadIsDeleted(head),
-                Metadata: null);
+                head.GetString("Metadata"));
+    }
+
+    public async Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default)
+    {
+        var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
+        return head is null || TableSchema.HeadHardDeleted(head)
+            ? null
+            : StreamMetadata.FromJson(head.GetString("Metadata"));
+    }
+
+    public async Task SetStreamMetadataAsync(string streamId, StreamMetadata metadata, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(streamId);
+        ArgumentNullException.ThrowIfNull(metadata);
+        EnsureValidStreamId(streamId);
+
+        var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
+        if (head is not null && TableSchema.HeadHardDeleted(head))
+            throw new StreamDeletedException(streamId);
+
+        var json = metadata.ToJson();
+        if (head is null)
+        {
+            // Metadata may be set before the stream has events — create a full HEAD at version 0.
+            var newHead = TableSchema.NewHead(streamId);
+            newHead["Metadata"] = json;
+            try
+            {
+                await eventsTable.AddEntityAsync(newHead, ct).ConfigureAwait(false);
+                return;
+            }
+            catch (RequestFailedException e) when (e.Status == 409)
+            {
+                // A concurrent append created the HEAD first; fall through to a merge.
+            }
+        }
+
+        // Merge only the metadata property, unconditionally, so a concurrent append (which advances the
+        // HEAD's version and etag) never makes setting metadata fail.
+        var patch = new TableEntity(streamId, TableSchema.HeadRowKey) { ["Metadata"] = json };
+        await eventsTable.UpdateEntityAsync(patch, ETag.All, TableUpdateMode.Merge, ct).ConfigureAwait(false);
     }
 
     // The public global read is served from the $all index, which is built asynchronously by
@@ -488,7 +529,7 @@ internal sealed class AzureTablesEventStore(
         var systemFilter = $"PartitionKey eq '{Escape(TableSchema.SystemStream)}' and RowKey ge '{TableSchema.EventRowKeyLowerBound}' "
                            + $"and RowKey le '{TableSchema.EventRowKeyUpperBound}'";
 
-        var removed = -1;
+        long removed = -1;
         for (var attempt = 1; ; attempt++)
         {
             var expired = new List<TableEntity>();
@@ -519,13 +560,66 @@ internal sealed class AzureTablesEventStore(
             break;
         }
 
+        var applyRetention = options?.ApplyRetention ?? true;
+        var now = timeProvider.GetUtcNow();
         var streams = 0;
-        await foreach (var _ in eventsTable
+        var plan = new List<(string StreamId, long Boundary, long TruncatedBefore)>();
+
+        await foreach (var head in eventsTable
                            .QueryAsync<TableEntity>($"RowKey eq '{TableSchema.HeadRowKey}'", cancellationToken: ct)
                            .ConfigureAwait(false))
+        {
             streams++;
+            if (!applyRetention || TableSchema.HeadIsDeleted(head) || TableSchema.HeadHardDeleted(head))
+                continue;
+
+            var meta = StreamMetadata.FromJson(head.GetString("Metadata"));
+            if (meta is not { HasRetention: true })
+                continue;
+
+            var streamId = head.PartitionKey;
+            var version = TableSchema.HeadVersion(head);
+            var truncatedBefore = TableSchema.HeadTruncatedBefore(head);
+            var boundary = truncatedBefore;
+            if (meta.MaxCount is { } max && version > max)
+                boundary = Math.Max(boundary, version - max + 1);
+            if (meta.MaxAge is { } age)
+                boundary = Math.Max(boundary, await AgeBoundaryAsync(streamId, now - age, version, ct).ConfigureAwait(false));
+
+            if (boundary > truncatedBefore)
+                plan.Add((streamId, boundary, truncatedBefore));
+        }
+
+        // A stream deleted between planning and truncating is skipped, so one race does not sink the pass.
+        foreach (var (streamId, boundary, truncatedBefore) in plan)
+        {
+            try
+            {
+                await TruncateStreamAsync(streamId, boundary, force: true, ct).ConfigureAwait(false);
+                removed += boundary - truncatedBefore;
+            }
+            catch (StreamNotFoundException)
+            {
+                // The stream was deleted after it was planned; nothing to retain-truncate.
+            }
+        }
 
         return new ScavengeReport(streams, Math.Max(0, removed));
+    }
+
+    // The first version still within the age window (events order by version, i.e. append/record order),
+    // or version + 1 when every event is older than the cutoff. Used to compute a retention boundary.
+    private async Task<long> AgeBoundaryAsync(string streamId, DateTimeOffset cutoff, long version, CancellationToken ct)
+    {
+        var filter = $"PartitionKey eq '{Escape(streamId)}' and RowKey ge '{TableSchema.EventRowKeyLowerBound}' "
+                     + $"and RowKey le '{TableSchema.EventRowKeyUpperBound}'";
+        await foreach (var e in eventsTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+        {
+            if (e.GetDateTimeOffset("CreatedAt") is { } createdAt && createdAt >= cutoff)
+                return TableSchema.Version(e);
+        }
+
+        return version + 1;
     }
 
     // Resolves an event's payloads (downloading blobs for spilled fields). Returns null when a

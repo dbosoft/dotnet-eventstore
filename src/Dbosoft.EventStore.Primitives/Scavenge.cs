@@ -5,9 +5,10 @@ namespace Dbosoft.EventStore;
 public sealed record ScavengeOptions
 {
     /// <summary>
-    /// Reserved for a future retention engine that will apply per-stream policies (max count, max age)
-    /// during a scavenge. No provider acts on it yet; today a scavenge only reclaims expired
-    /// <c>$system</c> tombstones.
+    /// Whether the scavenge applies each stream's retention policy (max count, max age from
+    /// <see cref="StreamMetadata"/>), force-truncating streams past their limits. On by default; set false
+    /// to reclaim only expired <c>$system</c> tombstones and leave stream events untouched. A provider
+    /// without <c>IStreamMetadataStore</c> has no policies to apply, so this has no effect there.
     /// </summary>
     public bool ApplyRetention { get; init; } = true;
 

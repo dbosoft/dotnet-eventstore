@@ -18,7 +18,7 @@ internal sealed class EfCoreEventStore(
     TimeProvider timeProvider,
     bool inBandMarkers,
     TimeSpan tombstoneRetention)
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend
+    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
 {
     public StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
 
@@ -396,7 +396,51 @@ internal sealed class EfCoreEventStore(
 
         return head is null || head.HardDeleted
             ? null
-            : new StreamInfo(streamId, head.Version, head.TruncatedBefore, head.IsDeleted, Metadata: null);
+            : new StreamInfo(streamId, head.Version, head.TruncatedBefore, head.IsDeleted, head.Metadata);
+    }
+
+    public async Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default)
+    {
+        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        var json = await ctx.Streams.AsNoTracking()
+            .Where(s => s.Domain == domain && s.StreamId == streamId && !s.HardDeleted)
+            .Select(s => s.Metadata)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        return StreamMetadata.FromJson(json);
+    }
+
+    public async Task SetStreamMetadataAsync(string streamId, StreamMetadata metadata, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(streamId);
+        ArgumentNullException.ThrowIfNull(metadata);
+
+        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
+        if (head is { HardDeleted: true })
+            throw new StreamDeletedException(streamId);
+
+        var json = metadata.ToJson();
+        if (head is null)
+        {
+            try
+            {
+                // Metadata may be set before a stream has events — create the head at version 0.
+                ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = streamId, Metadata = json });
+                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException)
+            {
+                // A concurrent writer created the head first; fall through to update its metadata column.
+                ctx.ChangeTracker.Clear();
+            }
+        }
+
+        // Update only the metadata column, bypassing the version concurrency token — metadata is not
+        // version-controlled, so a concurrent append must not make setting it fail.
+        await ctx.Streams
+            .Where(s => s.Domain == domain && s.StreamId == streamId)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Metadata, json), ct).ConfigureAwait(false);
     }
 
     public async IAsyncEnumerable<StoredEvent> ReadAllAsync(
@@ -520,14 +564,71 @@ internal sealed class EfCoreEventStore(
 
     public async Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
     {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var cutoff = timeProvider.GetUtcNow() - tombstoneRetention;
+        var applyRetention = options?.ApplyRetention ?? true;
+        long removed;
+        int streams;
+        var plan = new List<(string StreamId, long Boundary)>();
 
-        var removed = await ctx.Events
-            .Where(e => e.Domain == domain && e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < cutoff)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await using (var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false))
+        {
+            var cutoff = timeProvider.GetUtcNow() - tombstoneRetention;
+            removed = await ctx.Events
+                .Where(e => e.Domain == domain && e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < cutoff)
+                .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            streams = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
 
-        var streams = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
+            if (applyRetention)
+            {
+                var now = timeProvider.GetUtcNow();
+                var withPolicy = await ctx.Streams.AsNoTracking()
+                    .Where(s => s.Domain == domain && s.Metadata != null && !s.IsDeleted && !s.HardDeleted)
+                    .Select(s => new { s.StreamId, s.Version, s.TruncatedBefore, s.Metadata })
+                    .ToListAsync(ct).ConfigureAwait(false);
+
+                foreach (var row in withPolicy)
+                {
+                    var meta = StreamMetadata.FromJson(row.Metadata);
+                    if (meta is not { HasRetention: true })
+                        continue;
+
+                    var boundary = row.TruncatedBefore;
+                    if (meta.MaxCount is { } max && row.Version > max)
+                        boundary = Math.Max(boundary, row.Version - max + 1);
+                    if (meta.MaxAge is { } age)
+                    {
+                        var ageCutoff = now - age;
+                        var firstKept = await ctx.Events.AsNoTracking()
+                            .Where(e => e.Domain == domain && e.StreamId == row.StreamId && e.CreatedAt >= ageCutoff)
+                            .Select(e => (long?)e.StreamVersion)
+                            .OrderBy(v => v)
+                            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+                        boundary = Math.Max(boundary, firstKept ?? row.Version + 1);
+                    }
+
+                    if (boundary > row.TruncatedBefore)
+                    {
+                        removed += boundary - row.TruncatedBefore; // the contiguous versions being dropped
+                        plan.Add((row.StreamId, boundary));
+                    }
+                }
+            }
+        }
+
+        // Force-truncate outside the query context; each call opens its own transaction and emits the
+        // retention truncation's marker so read models learn to forget. A stream deleted between planning
+        // and truncating is skipped, so one race does not sink the whole pass.
+        foreach (var (streamId, boundary) in plan)
+        {
+            try
+            {
+                await TruncateStreamAsync(streamId, boundary, force: true, ct).ConfigureAwait(false);
+            }
+            catch (StreamNotFoundException)
+            {
+                // The stream was deleted after it was planned; nothing to retain-truncate.
+            }
+        }
+
         return new ScavengeReport(streams, removed);
     }
 

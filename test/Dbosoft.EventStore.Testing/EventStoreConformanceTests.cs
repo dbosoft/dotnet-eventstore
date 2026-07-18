@@ -791,4 +791,96 @@ public abstract class EventStoreConformanceTests
         outcomes.Count(won => won).Should().Be(1);
         (await store.ReadAllOf("x")).Should().HaveCount(2);
     }
+
+    // ---- optional: stream metadata and retention ----
+
+    [Fact]
+    public async Task Stream_metadata_round_trips()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMetadataStore metadata)
+            return;
+
+        (await metadata.GetStreamMetadataAsync("s1")).Should().BeNull();
+
+        var set = new StreamMetadata
+        {
+            MaxCount = 100,
+            MaxAge = TimeSpan.FromDays(30),
+            Custom = new Dictionary<string, string> { ["owner"] = "team-a" }
+        };
+        await metadata.SetStreamMetadataAsync("s1", set);
+
+        var got = await metadata.GetStreamMetadataAsync("s1");
+        got.Should().NotBeNull();
+        got.MaxCount.Should().Be(100);
+        got.MaxAge.Should().Be(TimeSpan.FromDays(30));
+        got.Custom!["owner"].Should().Be("team-a");
+    }
+
+    [Fact]
+    public async Task Stream_metadata_can_be_set_before_the_stream_has_events()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMetadataStore metadata)
+            return;
+
+        await metadata.SetStreamMetadataAsync("s1", new StreamMetadata { MaxCount = 10 });
+        // Setting metadata up front does not block the first append.
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(2));
+
+        (await metadata.GetStreamMetadataAsync("s1"))!.MaxCount.Should().Be(10);
+        (await store.ReadAllOf("s1")).Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task Retention_by_max_count_truncates_to_the_newest_events()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMetadataStore metadata || store is not IScavengeable scavenger)
+            return;
+
+        await metadata.SetStreamMetadataAsync("s1", new StreamMetadata { MaxCount = 3 });
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
+
+        var report = await scavenger.ScavengeAsync();
+
+        // Only the three newest events survive; the two oldest are truncated away and reported removed.
+        (await store.ReadAllOf("s1")).Select(e => e.StreamVersion).Should().Equal(3, 4, 5);
+        (await store.GetStreamInfoAsync("s1"))!.TruncatedBefore.Should().Be(3);
+        report.EventsRemoved.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Retention_by_max_age_zero_truncates_every_past_event()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMetadataStore metadata || store is not IScavengeable scavenger)
+            return;
+
+        // A zero window keeps nothing recorded before "now" — a deterministic exercise of the max-age path
+        // without needing to control the provider's clock.
+        await metadata.SetStreamMetadataAsync("s1", new StreamMetadata { MaxAge = TimeSpan.Zero });
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+
+        await scavenger.ScavengeAsync();
+
+        (await store.ReadAllOf("s1")).Should().BeEmpty();
+        (await store.GetStreamInfoAsync("s1"))!.TruncatedBefore.Should().Be(4);
+    }
+
+    [Fact]
+    public async Task Metadata_of_a_hard_deleted_stream_reads_as_null()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMetadataStore metadata || store is not IStreamDeletable deletable)
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+        await metadata.SetStreamMetadataAsync("s1", new StreamMetadata { MaxCount = 10 });
+
+        await deletable.DeleteStreamAsync("s1", DeleteMode.Hard);
+
+        (await metadata.GetStreamMetadataAsync("s1")).Should().BeNull();
+    }
 }

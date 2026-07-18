@@ -11,7 +11,7 @@ namespace Dbosoft.EventStore.InMemory;
 /// </summary>
 [PublicAPI]
 public sealed class InMemoryEventStore
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend
+    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
@@ -266,7 +266,41 @@ public sealed class InMemoryEventStore
                 return Task.FromResult<StreamInfo?>(null);
 
             return Task.FromResult<StreamInfo?>(
-                new StreamInfo(streamId, state.Version, state.TruncatedBefore, state.IsDeleted, Metadata: null));
+                new StreamInfo(streamId, state.Version, state.TruncatedBefore, state.IsDeleted, state.Metadata?.ToJson()));
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            return Task.FromResult(
+                _streams.TryGetValue(streamId, out var state) && !state.HardDeleted ? state.Metadata : null);
+        }
+    }
+
+    /// <inheritdoc />
+    public Task SetStreamMetadataAsync(string streamId, StreamMetadata metadata, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(streamId);
+        ArgumentNullException.ThrowIfNull(metadata);
+        ct.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_streams.TryGetValue(streamId, out var state))
+            {
+                // Metadata may be set before a stream has events — e.g. a retention policy up front.
+                state = new StreamState();
+                _streams[streamId] = state;
+            }
+
+            if (state.HardDeleted)
+                throw new StreamDeletedException(streamId);
+
+            state.Metadata = metadata;
+            return Task.CompletedTask;
         }
     }
 
@@ -412,24 +446,83 @@ public sealed class InMemoryEventStore
     }
 
     /// <inheritdoc />
-    public Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
+    public async Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        var applyRetention = options?.ApplyRetention ?? true;
+        List<(string StreamId, long Boundary)> retentionPlan = [];
+        long removed;
 
-        // Truncation and deletion already free stream memory eagerly. What a scavenge reclaims here is
-        // expired $system tombstones — transient markers kept only long enough to propagate.
+        // Truncation and deletion already free stream memory eagerly. A scavenge reclaims expired $system
+        // tombstones and, with retention enabled, plans per-stream truncations from each stream's policy.
         lock (_gate)
         {
-            long removed = 0;
-            var cutoff = _timeProvider.GetUtcNow() - _tombstoneRetention;
+            removed = 0;
+            var tombstoneCutoff = _timeProvider.GetUtcNow() - _tombstoneRetention;
             if (_streams.TryGetValue(SystemEventTypes.SystemStream, out var sys))
             {
-                removed = sys.Events.RemoveAll(e => e.CreatedAt < cutoff);
-                _all.RemoveAll(e => e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < cutoff);
+                removed = sys.Events.RemoveAll(e => e.CreatedAt < tombstoneCutoff);
+                _all.RemoveAll(e => e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < tombstoneCutoff);
             }
 
-            return Task.FromResult(new ScavengeReport(_streams.Count, removed));
+            if (applyRetention)
+            {
+                var now = _timeProvider.GetUtcNow();
+                foreach (var (streamId, state) in _streams)
+                {
+                    if (state.Metadata is not { HasRetention: true } meta || state.IsDeleted || state.HardDeleted)
+                        continue;
+
+                    var boundary = RetentionBoundary(meta, state, now);
+                    if (boundary <= state.TruncatedBefore)
+                        continue;
+
+                    removed += state.Events.Count(e => e.StreamVersion < boundary);
+                    retentionPlan.Add((streamId, boundary));
+                }
+            }
         }
+
+        // Truncate outside the lock: the non-reentrant gate would deadlock, and TruncateStreamAsync also
+        // emits the retention truncation's marker so read models learn to forget. A stream deleted between
+        // planning and truncating is skipped, so one race does not sink the whole pass.
+        foreach (var (streamId, boundary) in retentionPlan)
+        {
+            try
+            {
+                await TruncateStreamAsync(streamId, boundary, force: true, ct).ConfigureAwait(false);
+            }
+            catch (StreamNotFoundException)
+            {
+                // The stream was deleted after it was planned; nothing to retain-truncate.
+            }
+        }
+
+        return new ScavengeReport(CountStreams(), removed);
+    }
+
+    // The highest version to retain-truncate before, given a policy: the max of the count boundary
+    // (keep the newest MaxCount) and the age boundary (drop events older than MaxAge). Called under the gate.
+    private static long RetentionBoundary(StreamMetadata meta, StreamState state, DateTimeOffset now)
+    {
+        var boundary = state.TruncatedBefore;
+        if (meta.MaxCount is { } max && state.Version > max)
+            boundary = Math.Max(boundary, state.Version - max + 1);
+        if (meta.MaxAge is { } age)
+        {
+            var cutoff = now - age;
+            // Truncate before the first event still within the age window; if none, drop them all.
+            long? firstKept = state.Events.Where(e => e.CreatedAt >= cutoff).Select(e => (long?)e.StreamVersion).Min();
+            boundary = Math.Max(boundary, firstKept ?? state.Version + 1);
+        }
+
+        return boundary;
+    }
+
+    private int CountStreams()
+    {
+        lock (_gate)
+            return _streams.Count;
     }
 
     // Appends a marker event into $all so read models learn to forget or reproject. Goes on the
@@ -553,6 +646,7 @@ public sealed class InMemoryEventStore
         public long TruncatedBefore { get; set; } = 1;
         public bool IsDeleted { get; set; }
         public bool HardDeleted { get; set; }
+        public StreamMetadata? Metadata { get; set; }
         public List<Entry> Events { get; } = [];
         public HashSet<Guid> EventIds { get; } = [];
     }

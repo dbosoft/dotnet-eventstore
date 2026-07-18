@@ -24,8 +24,5 @@ public enum StoreCapabilities
     ExactCatchup = 1 << 0,
 
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
-    SnapshotHistory = 1 << 1,
-
-    /// <summary>Reserved: streams carry readable and writable metadata. No metadata API exists yet.</summary>
-    StreamMetadata = 1 << 2
+    SnapshotHistory = 1 << 1
 }
