@@ -603,4 +603,42 @@ public abstract class EventStoreConformanceTests
         all.Count(e => e.EventType == SystemEventTypes.StreamDeleted).Should().Be(1);
     }
 
+    [Fact]
+    public async Task Concurrent_maintenance_on_distinct_streams_emits_every_marker_without_raw_errors()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
+            || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion)
+            || !store.Capabilities.HasFlag(StoreCapabilities.AllStreamReads))
+            return;
+
+        const int streams = 8;
+        for (var i = 0; i < streams; i++)
+            await store.AppendToStreamAsync($"s{i}", ExpectedVersion.NoStream, Events(2));
+
+        // Deleting distinct streams concurrently all target the shared $system marker head. Each op must
+        // complete — retrying its marker write on a version race — rather than leak a raw provider
+        // exception, and every tombstone must land exactly once.
+        var failures = new ConcurrentBag<Exception>();
+        var ops = Enumerable.Range(0, streams).Select(i => Task.Run(async () =>
+        {
+            try
+            {
+                await maintenance.DeleteStreamAsync($"s{i}", DeleteMode.Soft);
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }));
+        await Task.WhenAll(ops);
+
+        failures.Should().BeEmpty();
+
+        var markers = 0;
+        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
+            if (e.EventType == SystemEventTypes.StreamDeleted)
+                markers++;
+        markers.Should().Be(streams);
+    }
 }

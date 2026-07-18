@@ -228,101 +228,91 @@ internal sealed class EfCoreEventStore(
         return before is { } sequence ? GlobalPosition.FromSequence(sequence) : GlobalPosition.Start;
     }
 
-    public async Task TruncateStreamAsync(
+    public Task TruncateStreamAsync(
         string streamId,
         long beforeVersion,
         bool force = false,
-        CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
-        if (head is null || head.HardDeleted)
-            throw new StreamNotFoundException(streamId);
-
-        // A truncation point past the head means "drop everything"; clamp it so the recorded boundary
-        // never runs beyond the end of the stream.
-        beforeVersion = Math.Min(beforeVersion, head.Version + 1);
-
-        // A truncation that would remove nothing is a no-op — checked before the snapshot-coverage guard,
-        // so repeating it never fails just because the covering snapshot was later pruned.
-        if (beforeVersion <= head.TruncatedBefore)
-            return;
-
-        if (!force)
+        CancellationToken ct = default) =>
+        ExecuteMaintenanceAsync(async (ctx, token) =>
         {
-            var covering = await LatestSnapshotVersionAsync(ctx, streamId, ct).ConfigureAwait(false);
-            if (covering < beforeVersion - 1)
-                throw new NotSupportedByProviderException(
-                    $"Truncating stream '{streamId}' before version {beforeVersion} would leave it impossible "
-                    + "to reconstruct: no snapshot at or after that boundary exists. Pass force to override.");
-        }
+            var head = await ctx.Streams.FindAsync([domain, streamId], token).ConfigureAwait(false);
+            if (head is null || head.HardDeleted)
+                throw new StreamNotFoundException(streamId);
 
-        // The physical delete and the head/marker update must be all-or-nothing: without a wrapping
-        // transaction, ExecuteDelete commits on its own and a later failure would leave events gone
-        // with no tombstone — the exact state the marker exists to prevent.
-        await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
-        await ctx.Events
-            .Where(e => e.Domain == domain && e.StreamId == streamId && e.StreamVersion < beforeVersion)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            // A truncation point past the head means "drop everything"; clamp it so the recorded boundary
+            // never runs beyond the end of the stream.
+            var boundary = Math.Min(beforeVersion, head.Version + 1);
 
-        head.TruncatedBefore = beforeVersion;
-        await EmitMarkerAsync(ctx, SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion), streamId, ct)
-            .ConfigureAwait(false);
-        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-        await tx.CommitAsync(ct).ConfigureAwait(false);
-    }
+            // A truncation that would remove nothing is a no-op — checked before the snapshot-coverage
+            // guard, so repeating it never fails just because the covering snapshot was later pruned.
+            if (boundary <= head.TruncatedBefore)
+                return false;
 
-    public async Task DeleteStreamAsync(string streamId, DeleteMode mode, CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
-        if (head is null || head.HardDeleted)
-            throw new StreamNotFoundException(streamId);
+            if (!force)
+            {
+                var covering = await LatestSnapshotVersionAsync(ctx, streamId, token).ConfigureAwait(false);
+                if (covering < boundary - 1)
+                    throw new NotSupportedByProviderException(
+                        $"Truncating stream '{streamId}' before version {boundary} would leave it impossible "
+                        + "to reconstruct: no snapshot at or after that boundary exists. Pass force to override.");
+            }
 
-        // Deleting an already-soft-deleted stream is a no-op — don't re-emit a tombstone. A stream
-        // recreated after deletion clears IsDeleted on append, so this only skips a true repeat.
-        if (mode == DeleteMode.Soft && head.IsDeleted)
-            return;
+            await ctx.Events
+                .Where(e => e.Domain == domain && e.StreamId == streamId && e.StreamVersion < boundary)
+                .ExecuteDeleteAsync(token).ConfigureAwait(false);
+            head.TruncatedBefore = boundary;
+            await EmitMarkerAsync(ctx, SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, boundary), streamId, token)
+                .ConfigureAwait(false);
+            return true;
+        }, transactional: true, ct);
 
-        // All-or-nothing, as with truncation: the physical deletes and the head/marker update must
-        // commit together, or a mid-op failure would strand rows with no tombstone.
-        await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
-        await ctx.Events.Where(e => e.Domain == domain && e.StreamId == streamId)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
-        await ctx.Snapshots.Where(s => s.Domain == domain && s.StreamId == streamId)
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+    public Task DeleteStreamAsync(string streamId, DeleteMode mode, CancellationToken ct = default) =>
+        ExecuteMaintenanceAsync(async (ctx, token) =>
+        {
+            var head = await ctx.Streams.FindAsync([domain, streamId], token).ConfigureAwait(false);
+            if (head is null || head.HardDeleted)
+                throw new StreamNotFoundException(streamId);
 
-        head.IsDeleted = true;
-        head.TruncatedBefore = head.Version + 1;
-        if (mode == DeleteMode.Hard)
-            head.HardDeleted = true;
+            // Deleting an already-soft-deleted stream is a no-op — don't re-emit a tombstone. A stream
+            // recreated after deletion clears IsDeleted on append, so this only skips a true repeat.
+            if (mode == DeleteMode.Soft && head.IsDeleted)
+                return false;
 
-        await EmitMarkerAsync(ctx, SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null, ct)
-            .ConfigureAwait(false);
-        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-        await tx.CommitAsync(ct).ConfigureAwait(false);
-    }
+            await ctx.Events.Where(e => e.Domain == domain && e.StreamId == streamId)
+                .ExecuteDeleteAsync(token).ConfigureAwait(false);
+            await ctx.Snapshots.Where(s => s.Domain == domain && s.StreamId == streamId)
+                .ExecuteDeleteAsync(token).ConfigureAwait(false);
 
-    public async Task RedactEventAsync(
+            head.IsDeleted = true;
+            head.TruncatedBefore = head.Version + 1;
+            if (mode == DeleteMode.Hard)
+                head.HardDeleted = true;
+
+            await EmitMarkerAsync(ctx, SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null, token)
+                .ConfigureAwait(false);
+            return true;
+        }, transactional: true, ct);
+
+    public Task RedactEventAsync(
         string streamId,
         long version,
         ReadOnlyMemory<byte> newData,
         ReadOnlyMemory<byte>? newMetadata = null,
-        CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var row = await ctx.Events
-            .FirstOrDefaultAsync(e => e.Domain == domain && e.StreamId == streamId && e.StreamVersion == version, ct)
-            .ConfigureAwait(false);
-        if (row is null)
-            throw new StreamNotFoundException(streamId);
+        CancellationToken ct = default) =>
+        ExecuteMaintenanceAsync(async (ctx, token) =>
+        {
+            var row = await ctx.Events
+                .FirstOrDefaultAsync(e => e.Domain == domain && e.StreamId == streamId && e.StreamVersion == version, token)
+                .ConfigureAwait(false);
+            if (row is null)
+                throw new StreamNotFoundException(streamId);
 
-        row.Data = newData.ToArray();
-        row.Metadata = newMetadata?.ToArray();
-        await EmitMarkerAsync(ctx, SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId, ct)
-            .ConfigureAwait(false);
-        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-    }
+            row.Data = newData.ToArray();
+            row.Metadata = newMetadata?.ToArray();
+            await EmitMarkerAsync(ctx, SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId, token)
+                .ConfigureAwait(false);
+            return true;
+        }, transactional: false, ct);
 
     public async Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
     {
@@ -335,6 +325,41 @@ internal sealed class EfCoreEventStore(
 
         var streams = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
         return new ScavengeReport(streams, removed);
+    }
+
+    // Runs a destructive operation that also emits a system marker, retrying if a concurrent maintenance
+    // op advanced the shared $system marker head between the read and the write (a unique-index or
+    // concurrency-token conflict on the marker), so callers see a domain outcome, never a raw EF error.
+    // The operation returns true when it made changes to persist, or false for a no-op. Destructive
+    // ops that use ExecuteDelete pass transactional: true so the delete and the marker commit together.
+    private async Task ExecuteMaintenanceAsync(
+        Func<EventStoreDbContext, CancellationToken, Task<bool>> operation,
+        bool transactional,
+        CancellationToken ct)
+    {
+        const int maxAttempts = 32;
+        for (var attempt = 1; ; attempt++)
+        {
+            await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using var tx = transactional
+                ? await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
+                : null;
+
+            if (!await operation(ctx, ct).ConfigureAwait(false))
+                return;
+
+            try
+            {
+                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                if (tx is not null)
+                    await tx.CommitAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException && attempt < maxAttempts)
+            {
+                // A concurrent maintenance op took the marker version; retry against the new head.
+            }
+        }
     }
 
     private async Task EmitMarkerAsync(

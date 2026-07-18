@@ -43,6 +43,11 @@ public readonly record struct GlobalPosition(string Token) : IComparable<GlobalP
     /// Builds a position from a monotonic sequence number, zero-padded so ordinal string order
     /// matches numeric order. Used by providers whose global order is a dense counter.
     /// </summary>
-    public static GlobalPosition FromSequence(long sequence) =>
-        new(sequence.ToString("D19", CultureInfo.InvariantCulture));
+    public static GlobalPosition FromSequence(long sequence)
+    {
+        // D19 padding only keeps ordinal order for non-negative values; a negative sequence would sort
+        // wrong (the leading '-' orders before digits). Providers use a monotonic counter, so guard it.
+        ArgumentOutOfRangeException.ThrowIfNegative(sequence);
+        return new GlobalPosition(sequence.ToString("D19", CultureInfo.InvariantCulture));
+    }
 }

@@ -40,7 +40,7 @@ Rejected, with reasons:
 | `GetSnapshotsByTypeAsync`, `ResourceSnapshotEntry.ResourceType`, `SapRoleSnapshotEntry.SystemId/Client` | The snapshot table is being used as a read model. Plus `ResourceTypeFromStreamId` with `IndexOf('-')` — an undocumented string contract. Domain knowledge that does not belong in a general library. |
 | `ReadStreamAsync` without paging | Always materializes the entire stream. |
 | Payload as `string` | Forces JSON and collides with ATS limits (64 KB per string property, 1 MB per entity). |
-| No EventId | Rebus retries append duplicates. Fixed with an `EventId` assigned **at `Raise`** (stable across save retries, so a retried save is an idempotent no-op, not a duplicate), and **batch-scoped** idempotency: an exact replay of a stored batch succeeds returning the original outcome, a partial overlap is an error, in-batch duplicates are an error. Dedup holds only while the events are retained (truncation drops the record). |
+| No EventId | Rebus retries append duplicates. Fixed with an `EventId` assigned **at `Raise`** (stable across save retries, so a retried save is an idempotent no-op, not a duplicate), and **batch-scoped** idempotency keyed on the `EventId` set (not payload contents): a batch whose ids are all already stored succeeds returning the original outcome, a partial overlap is an error, in-batch duplicates are an error. Dedup holds only while the events are retained (truncation drops the record). |
 | `DateTime.UtcNow` inline | Not testable; `TimeProvider` is the standard. |
 | One snapshot per stream (upsert) | No history, no "snapshot at version N". |
 
