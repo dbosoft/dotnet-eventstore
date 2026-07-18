@@ -183,6 +183,7 @@ internal sealed class EfCoreEventStore(
         var results = new AppendResult[appends.Count];
         var stagedLastRow = new EventRow?[appends.Count];
         var stagedVersion = new long[appends.Count];
+        var preVersions = new long[appends.Count]; // head version seen before staging, per entry
         var anyStaged = false;
 
         for (var i = 0; i < appends.Count; i++)
@@ -213,6 +214,7 @@ internal sealed class EfCoreEventStore(
                 throw new StreamDeletedException(append.StreamId);
 
             var current = head?.Version ?? 0;
+            preVersions[i] = current;
             EnsureExpectedVersion(append.StreamId, append.ExpectedVersion, current);
 
             if (append.Events.Count == 0)
@@ -266,7 +268,7 @@ internal sealed class EfCoreEventStore(
                 // A concurrent writer touched one of these streams; the whole batch rolled back. Re-read
                 // to tell an idempotent race (the same work already committed) from a genuine conflict.
                 await tx.RollbackAsync(ct).ConfigureAwait(false);
-                var reconciled = await ReconcileMultiAppendAsync(appends, ct).ConfigureAwait(false);
+                var reconciled = await ReconcileMultiAppendAsync(appends, preVersions, ct).ConfigureAwait(false);
                 if (reconciled is null)
                     throw; // not a version race (a transient/other DB error) — surface the real cause
                 return reconciled;
@@ -293,7 +295,7 @@ internal sealed class EfCoreEventStore(
     // overlap, or version conflict). Returns null when no entry explains the failure, meaning it was not
     // a version race but a transient/other DB error the caller should see rethrown.
     private async Task<IReadOnlyList<AppendResult>?> ReconcileMultiAppendAsync(
-        IReadOnlyList<StreamAppend> appends, CancellationToken ct)
+        IReadOnlyList<StreamAppend> appends, long[] preVersions, CancellationToken ct)
     {
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
@@ -354,6 +356,13 @@ internal sealed class EfCoreEventStore(
                     $"The append to stream '{append.StreamId}' partially overlaps events already stored; an append "
                     + "must be either entirely new or an exact replay of a prior batch.");
             if (!IsExpectedVersionSatisfied(append.ExpectedVersion, actualVersions[i]))
+                throw new WrongExpectedVersionException(append.StreamId, append.ExpectedVersion, actualVersions[i]);
+
+            // A version-agnostic entry (Any/StreamExists) whose batch never landed and whose head advanced
+            // since we staged lost the version race — surface it as a conflict instead of a raw DB error,
+            // just as the single-stream path does. An unchanged head means this entry did not cause the
+            // rollback (another entry, or a transient error, did).
+            if (append.Events.Count > 0 && storedCounts[i] == 0 && actualVersions[i] != preVersions[i])
                 throw new WrongExpectedVersionException(append.StreamId, append.ExpectedVersion, actualVersions[i]);
         }
 

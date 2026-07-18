@@ -128,8 +128,10 @@ they do not use:
 Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default);
 ```
 
-ATS answers it for free — the ticks *are* the key. EF Core answers it via an index on `CreatedAt`
-that is only created when the feature is switched on.
+Both providers implement it unconditionally, today via a scan filtered on `CreatedAt` — ATS enumerates
+the events table (there the tick is *not* the row key, so it is not "free"), EF Core runs an unindexed
+`WHERE CreatedAt < t`. A `CreatedAt` index (ATS: an index-backed lookup; EF Core: an opt-in column
+index) is a planned optimization, not yet built — so time navigation is correct but not cheap.
 
 ### D3 — Catch-up reads, not subscriptions; delivery is the bus's job
 
@@ -145,7 +147,20 @@ capability `ExactCatchup`. It is not an ATS-only problem. On SQL an identity val
 `INSERT` but only becomes visible at `COMMIT`, so a reader taking `WHERE Position > checkpoint` and
 advancing to the max position can skip an event that was assigned an earlier position and commits
 later. The reader needs a **watermark** — never advance past a point somebody could still write
-below. The mechanism differs by provider:
+below.
+
+> **Implementation status (v1): the watermark is designed here but NOT yet built.** Neither the gap
+> detection nor the safety window below is implemented. `EfCoreEventStore.ReadAllAsync` is a plain
+> `WHERE Position > from ORDER BY Position`, and `AzureTablesIndexProjector` advances its checkpoint to
+> the highest position it has seen. So on EF Core and ATS a catch-up **can permanently miss** an event
+> whose position was assigned before a commit that lands after the reader has passed that position — and
+> on ATS, because `$all` is served from the projector-built index, the missed event never appears in
+> `$all` at all until the projector's checkpoint is reset. `ExactCatchup` correctly advertises the
+> absence of this guarantee; the mechanisms below are the planned fix, and de-duplication alone does not
+> substitute for them (a miss is not a duplicate). This is the top known limitation, tracked for a
+> follow-up.
+
+The mechanism differs by provider:
 
 **EF Core: gap detection over the dense sequence.** The reader sees 1, 2, 3, 5 and *knows*
 that 4 is either still open or aborted. It waits, and after a gap timeout it moves on. The
@@ -186,9 +201,11 @@ separate store instance per domain, so its sequence is gap-free) and declares `E
 shipped EF Core layout does **not**: domains are an indexed discriminator over one `es_events` table
 with one shared identity column (§5), so a single domain's positions are sparse — the gaps are other
 domains' events, indistinguishable from missing ones. EF Core therefore does **not** declare
-`ExactCatchup` in v1; its catch-up reads are ordered and complete but consumers must de-duplicate by
-`EventId`. Restoring density (per-domain sequences, or table-per-domain) is the path to the flag on
-EF Core, and is left as a later option. ATS never had a dense sequence and does not declare it.
+`ExactCatchup` in v1; its catch-up reads are ordered, but — with the watermark unbuilt (see the status
+note above) — not complete under concurrent out-of-order commits, so a consumer can miss an event, not
+merely receive a duplicate. Restoring density (per-domain sequences, or table-per-domain) plus gap
+detection is the path to the flag on EF Core, and is left as a later option. ATS never had a dense
+sequence and does not declare it.
 
 ### D4 — The core only knows bytes
 
@@ -428,8 +445,8 @@ last one is missing in SAPId and is what retry logic needs.
 - `Events` — `Position` (identity, PK), `StreamId`, `StreamVersion`, `EventId`, `EventType`,
   `Data` (varbinary), `Metadata`, `ContentType`, `CreatedAt`.
   Unique `(StreamId, StreamVersion)`, unique `(StreamId, EventId)` for idempotency.
-  **No composite time index** — `$all` rides the PK (D2). An index on `CreatedAt` is created *only*
-  when time navigation is enabled for the domain.
+  **No composite time index** — `$all` rides the PK (D2). There is no `CreatedAt` index yet, so time
+  navigation (`FindPositionAtAsync`) is an unindexed scan; a `CreatedAt` index is a planned optimization.
 - `Snapshots` — PK `(StreamId, StreamVersion)`.
 
 **Append without a pre-read race:** no `MaxAsync`. Two race-free schemes, composable:
@@ -504,7 +521,12 @@ it does not need the newest event synchronously. **Atomicity:** the index entrie
 partitions than the event, so no EGT spans
 both — Microsoft's *eventually consistent transactions pattern*, the projector being the "written
 idempotently after" step. If the projector never runs, backward reads fall back to the events-table
-scan and `$all` is empty until it does — always correct, never blocking a write.
+scan and `$all` is empty until it does — never blocking a write.
+**Completeness caveat:** the projector advances its checkpoint to the highest position it has seen and
+has no safety window (D3, status note), so an append whose tick was allocated before a later-committing
+sibling can be skipped permanently. Until the safety window is built, treat ATS `$all` as complete only
+outside the concurrent-append window; a full index rebuild (reset the projector checkpoint) recovers a
+missed event, since the events table itself never loses it.
 
 **Alternatives considered and rejected (for a dense global sequence):**
 
@@ -558,11 +580,13 @@ fixed now).** The target is: "delete all entries older than 30 days", and "delet
 than 30 days of category A". Two consequences that must be baked in before the stores:
 
 - **The searchable home is `EventData.Metadata`, not a new typed field.** Category, tenant, and also
-  correlation/causation ids are metadata (structured, e.g. JSON). Retention predicates match on
-  metadata plus `CreatedAt` (time is free — every event has it). We deliberately do **not** add an
-  `Attributes` property to the event; the providers make metadata *queryable* (EF Core: a JSON column
-  with indexed paths; ATS: entity properties; InMemory: parse and match), so "category A" is a
-  metadata search, not a schema change.
+  correlation/causation ids are metadata (structured, e.g. JSON). Attribute-filtered retention
+  predicates would match on metadata plus `CreatedAt` (time is free — every event has it). We
+  deliberately do **not** add an `Attributes` property to the event. *Not yet built:* event metadata is
+  stored opaquely today (EF Core `varbinary`, ATS payload, InMemory bytes), so making it queryable (a
+  JSON column with indexed paths / queryable entity properties / parse-and-match) is future work. What
+  ships now is *stream-level* retention (`StreamMetadata` max-count / max-age via `IStreamMetadataStore`),
+  not per-event attribute search.
 - **Attribute-filtered retention deletes selectively — it punches holes.** Removing "category A older
   than 30 days" can drop event #5 while keeping #3 and #7. That is *not* prefix truncation, so it is
   **only valid for non-folded (log) domains** — a hole breaks an aggregate's fold. This is the same

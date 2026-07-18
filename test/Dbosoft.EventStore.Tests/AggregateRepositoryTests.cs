@@ -254,6 +254,35 @@ public sealed class AggregateRepositoryTests
     }
 
     [Fact]
+    public async Task Load_falls_back_to_an_older_snapshot_when_the_newest_is_unusable()
+    {
+        await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(3));
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+        var snapshots = sp.GetRequiredService<IEventStoreProvider>()
+            .GetSnapshotStore(EventStoreBuilder.DefaultDomainName)!;
+
+        var counter = new Counter("c1");
+        counter.Increment(1);
+        counter.Increment(1);
+        counter.Increment(1);
+        await repo.SaveAsync(counter); // snapshot at v3
+        counter.Increment(1);
+        counter.Increment(1);
+        counter.Increment(1);
+        await repo.SaveAsync(counter); // snapshot at v6 — history keeps both
+
+        // Corrupt only the newest snapshot; the one at v3 is still usable.
+        await snapshots.SaveAsync("counter-c1", 6, "\"not an object\""u8.ToArray());
+
+        var loaded = await repo.LoadAsync("c1");
+
+        // The load walks back to the v3 snapshot and replays v4..6 — the SnapshotHistory fallback.
+        loaded.Should().NotBeNull();
+        loaded.Value.Should().Be(6);
+        loaded.Version.Should().Be(6);
+    }
+
+    [Fact]
     public async Task Load_fails_loudly_when_truncated_and_the_covering_snapshot_is_unusable()
     {
         await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5));

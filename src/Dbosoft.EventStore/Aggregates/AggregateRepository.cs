@@ -74,6 +74,12 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
 
                 if (snapshot.StreamVersion <= 0)
                     break;
+
+                // Only a SnapshotHistory store keeps more than the latest snapshot; on a latest-only store
+                // there is no older one to fall back to, so stop rather than re-query the same snapshot.
+                if (!_store.Capabilities.HasFlag(StoreCapabilities.SnapshotHistory))
+                    break;
+
                 upTo = snapshot.StreamVersion - 1;
             }
         }

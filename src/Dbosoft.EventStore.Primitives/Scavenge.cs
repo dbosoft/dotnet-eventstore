@@ -14,8 +14,8 @@ public sealed record ScavengeOptions
 
     /// <summary>
     /// Reserved: an upper bound on streams processed in one pass, for chunking a large scavenge. No
-    /// provider bounds its work by this yet; today a scavenge only reclaims expired <c>$system</c>
-    /// tombstones, which is cheap enough not to need chunking.
+    /// provider bounds its work by this yet, though the retention pass now scans every stream head — so
+    /// this is the knob a large-domain scavenge would eventually use.
     /// </summary>
     public int? MaxStreams { get; init; }
 }

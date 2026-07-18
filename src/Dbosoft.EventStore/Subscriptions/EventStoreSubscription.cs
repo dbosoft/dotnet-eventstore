@@ -14,10 +14,13 @@ namespace Dbosoft.EventStore.Subscriptions;
 /// subscription simply forwards each event and advances the checkpoint (the fast path).
 /// </item>
 /// <item>
-/// Without it, a catch-up read is complete only to a bounded-staleness window and may re-surface events
-/// on a later read, so the subscription de-duplicates by <see cref="StoredEvent.EventId"/> over a bounded
-/// window (<see cref="SubscriptionOptions.DeduplicationWindow"/>). This makes re-reading harmless, which
-/// is what lets a host safely re-pump from an earlier checkpoint to pick up late-arriving events.
+/// Without it, a catch-up read is only complete up to a bounded-staleness window: an event can commit
+/// below a position this subscription has already passed and be missed, because the pump advances the
+/// checkpoint to the highest position seen and never rewinds on its own. De-duplicating by
+/// <see cref="StoredEvent.EventId"/> over a bounded window (<see cref="SubscriptionOptions.DeduplicationWindow"/>)
+/// makes a re-read idempotent, but it does <b>not</b> recover a miss. For completeness on a non-exact
+/// store the host must periodically re-create the subscription from an earlier checkpoint (rewound by more
+/// than the store's staleness window); the dedup window is what makes that overlap safe.
 /// </item>
 /// </list>
 /// Requires the store to support <c>$all</c> reads (<see cref="IAllStreamReader"/>); constructing a

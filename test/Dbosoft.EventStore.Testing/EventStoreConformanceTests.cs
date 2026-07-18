@@ -7,9 +7,9 @@ namespace Dbosoft.EventStore.Testing;
 
 /// <summary>
 /// The provider-agnostic contract every event store must satisfy. A provider derives this class,
-/// supplies a fresh store from <see cref="CreateStore"/>, and inherits the whole suite. Tests for
-/// optional features are gated on the store's declared <see cref="StoreCapabilities"/>, so a
-/// provider is only held to what it claims to support.
+/// supplies a fresh store from <see cref="CreateStore"/>, and inherits the whole suite. Tests for an
+/// optional feature are gated on whether the store implements that feature's interface (e.g.
+/// <c>is ITruncatable</c>), so a provider is only held to what it actually supports.
 /// </summary>
 public abstract class EventStoreConformanceTests
 {
@@ -414,20 +414,23 @@ public abstract class EventStoreConformanceTests
     // ---- optional: time navigation ----
 
     [Fact]
-    public async Task Time_navigation_finds_position_at_timestamp()
+    public async Task Time_navigation_finds_the_position_before_a_timestamp()
     {
         var store = CreateStore();
-        if (store is not ITimeNavigable navigable)
-            return;
-        if (store is not IAllStreamReader reader)
+        if (store is not ITimeNavigable navigable || store is not IAllStreamReader reader)
             return;
 
         await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(2));
-
-        var position = await navigable.FindPositionAtAsync(DateTimeOffset.MinValue);
-
-        var all = await ReadAll(reader, position);
+        var all = await ReadAll(reader, GlobalPosition.Start);
         all.Should().HaveCount(2);
+
+        // Before everything → Start (reading from it yields the whole log). This end alone is satisfied by
+        // a method that always returns Start, so the "after everything" end below is what pins the semantics.
+        (await navigable.FindPositionAtAsync(all[0].CreatedAt.AddDays(-1))).Should().Be(GlobalPosition.Start);
+
+        // After everything → a position past the last event: reading from it (exclusive) yields nothing.
+        var afterAll = await navigable.FindPositionAtAsync(all[^1].CreatedAt.AddDays(1));
+        (await ReadAll(reader, afterAll)).Should().BeEmpty();
     }
 
     // ---- optional: truncation ----
