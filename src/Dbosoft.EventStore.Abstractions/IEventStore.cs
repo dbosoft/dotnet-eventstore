@@ -19,7 +19,8 @@ public interface IEventStore
     /// a batch whose ids are all already present is a no-op that returns the original outcome, a batch
     /// that only partially overlaps stored events is rejected, and a duplicate id within one batch is
     /// rejected. Dedup holds only while the events are retained (truncation drops their ids). An empty
-    /// batch is a no-op returning the current version.
+    /// batch writes nothing, but is still a checked no-op: it honours <paramref name="expectedVersion"/>
+    /// (throwing on a mismatch) and returns the current version.
     /// </summary>
     /// <exception cref="WrongExpectedVersionException">The stream is not at the expected version.</exception>
     /// <exception cref="StreamDeletedException">The stream has been hard-deleted.</exception>
