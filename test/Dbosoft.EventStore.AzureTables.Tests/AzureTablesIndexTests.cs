@@ -80,8 +80,6 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
         var reader = (IAllStreamReader)store;
         var projector = Provider.CreateIndexProjector(_store.Domain);
 
-        store.Capabilities.HasFlag(StoreCapabilities.SynchronousAllReads).Should().BeFalse();
-
         await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(2));
         await store.AppendToStreamAsync("b", ExpectedVersion.NoStream, Events(2));
 

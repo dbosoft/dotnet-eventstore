@@ -23,9 +23,9 @@ public abstract class EventStoreConformanceTests
     protected virtual ISnapshotStore? GetSnapshotStore(IEventStore store) => null;
 
     /// <summary>
-    /// Lets a provider whose <c>$all</c> is eventually consistent (no
-    /// <see cref="StoreCapabilities.SynchronousAllReads"/>) catch its global read up before an
-    /// assertion. Synchronous providers leave it a no-op; the tests call it before every <c>$all</c> read.
+    /// Lets a provider whose <c>$all</c> is eventually consistent (served from an asynchronously-built
+    /// index) catch its global read up before an assertion. Synchronous providers leave it a no-op; the
+    /// tests call it before every <c>$all</c> read.
     /// </summary>
     protected virtual Task SettleAllAsync() => Task.CompletedTask;
 

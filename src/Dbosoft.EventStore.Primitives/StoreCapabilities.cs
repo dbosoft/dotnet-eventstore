@@ -27,16 +27,6 @@ public enum StoreCapabilities
     ExactCatchup = 1 << 2,
 
     /// <summary>
-    /// A read of the global sequence sees an event as soon as its append returns — the global read is
-    /// synchronous with the write. Without this flag the global read is served from an eventually-built
-    /// index, so a just-appended event may not appear until the index catches up (a consumer that needs
-    /// it now re-reads); per-stream reads are unaffected. Implies neither more nor less than
-    /// <see cref="ExactCatchup"/> — one is about completeness under out-of-order commit, this about the
-    /// visibility delay of the global read.
-    /// </summary>
-    SynchronousAllReads = 1 << 10,
-
-    /// <summary>
     /// Reserved: events for several streams appended in one atomic operation. No append API for this
     /// exists yet, so no provider declares it; the flag is kept for when a multi-stream append is added.
     /// </summary>

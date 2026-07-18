@@ -254,9 +254,8 @@ internal sealed class AzureTablesEventStore(
     }
 
     // The public global read is served from the $all index, which is built asynchronously by
-    // AzureTablesIndexProjector — so it is eventually consistent (the store does not declare
-    // SynchronousAllReads) and a catch-up from a position is a bounded partition-range scan of the
-    // index rather than a full scan of every event.
+    // AzureTablesIndexProjector — so it is eventually consistent, and a catch-up from a position is a
+    // bounded partition-range scan of the index rather than a full scan of every event.
     public async IAsyncEnumerable<StoredEvent> ReadAllAsync(
         GlobalPosition from,
         ReadDirection direction = ReadDirection.Forwards,

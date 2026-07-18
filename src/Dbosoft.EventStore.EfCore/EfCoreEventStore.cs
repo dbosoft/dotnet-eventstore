@@ -22,7 +22,6 @@ internal sealed class EfCoreEventStore(
 {
     public StoreCapabilities Capabilities =>
         StoreCapabilities.AllStreamReads
-        | StoreCapabilities.SynchronousAllReads
         | StoreCapabilities.TimeNavigation
         | StoreCapabilities.Truncation
         | StoreCapabilities.StreamDeletion

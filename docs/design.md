@@ -482,9 +482,11 @@ checkpoint (the same shape as a bus relay) and is idempotent:
   scan. **Sharded buckets, not a single `$all` key** — MS warns about the log-tail hot-spot.
 
 Because the index is built asynchronously, the `$all` read is **eventually consistent**: an event
-appears once indexed, so ATS does **not** declare `SynchronousAllReads` (which InMemory and EF Core do,
-scanning the source directly). A consumer that needs an event *now* re-reads; a relay tails and does
-not care. **Atomicity:** the index entries live in different partitions than the event, so no EGT spans
+appears once indexed. This is not a separate capability — `$all` is *uniformly* a position-resumable
+catch-up read (resume from the last position, re-read to pick up more), so a consumer treats every
+provider the same; ATS merely has more latency before an event shows up. A relay tails and re-reads;
+it does not need the newest event synchronously. **Atomicity:** the index entries live in different
+partitions than the event, so no EGT spans
 both — Microsoft's *eventually consistent transactions pattern*, the projector being the "written
 idempotently after" step. If the projector never runs, backward reads fall back to the events-table
 scan and `$all` is empty until it does — always correct, never blocking a write.
@@ -500,9 +502,8 @@ scan and `$all` is empty until it does — always correct, never blocking a writ
 | No `$all` on ATS at all | The honest fallback: per-stream reads only. Costs cross-stream read models on ATS entirely. Kept in reserve if the index proves unworkable. |
 
 ⇒ ATS declares `AllStreamReads | TimeNavigation | Truncation | StreamDeletion | SnapshotHistory |
-Redaction`, but **not** `MultiStreamAtomicAppend`, **not** `ExactCatchup` (the monotonic position is
-per-process, so consumers de-duplicate by `EventId`), and **not** `SynchronousAllReads` (the global
-read is served from the asynchronously-built index).
+Redaction`, but **not** `MultiStreamAtomicAppend` and **not** `ExactCatchup` (the monotonic position is
+per-process, so a catch-up subscription de-duplicates by `EventId`).
 
 **Large payloads → blobs.** Each domain has a blob container. A payload field small enough stays inline
 in the entity; a field over the inline limit is written to a blob and the entity keeps a reference, so
