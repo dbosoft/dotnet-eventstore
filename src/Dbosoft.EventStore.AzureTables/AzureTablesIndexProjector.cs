@@ -17,16 +17,22 @@ public sealed class AzureTablesIndexProjector
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    private readonly IAllStreamReader _source;
+    private readonly AzureTablesEventStore _store;
     private readonly TableClient _index;
+    private readonly TableClient _allIndex;
     private readonly ICheckpointStore _checkpoints;
     private readonly string _checkpointName;
 
-    /// <summary>Creates the projector for one domain's store and index table.</summary>
-    public AzureTablesIndexProjector(IEventStore store, TableClient index, ICheckpointStore checkpoints, string checkpointName)
+    internal AzureTablesIndexProjector(
+        AzureTablesEventStore store,
+        TableClient index,
+        TableClient allIndex,
+        ICheckpointStore checkpoints,
+        string checkpointName)
     {
-        _source = (IAllStreamReader)store;
+        _store = store;
         _index = index;
+        _allIndex = allIndex;
         _checkpoints = checkpoints;
         _checkpointName = checkpointName;
     }
@@ -38,10 +44,15 @@ public sealed class AzureTablesIndexProjector
         var last = from;
         var count = 0;
 
-        await foreach (var stored in _source.ReadAllAsync(from, ct: ct).ConfigureAwait(false))
+        // Tail the strongly-consistent source scan (not the store's index-backed ReadAllAsync, which this
+        // projector is what fills).
+        await foreach (var stored in _store.ScanAllAsync(from, ct).ConfigureAwait(false))
         {
             await _index.UpsertEntityAsync(
                     TableSchema.IndexEntity(stored.StreamId, stored.StreamVersion), TableUpdateMode.Replace, ct)
+                .ConfigureAwait(false);
+            await _allIndex.UpsertEntityAsync(
+                    TableSchema.AllIndexEntity(stored.Position, stored.StreamId, stored.StreamVersion), TableUpdateMode.Replace, ct)
                 .ConfigureAwait(false);
             if (SystemEventTypes.IsSystem(stored.EventType))
                 await PruneAsync(stored, ct).ConfigureAwait(false);

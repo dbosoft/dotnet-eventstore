@@ -53,7 +53,8 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
         {
             var options = OptionsFor(key);
             return new AzureTablesEventStore(
-                EventsTable(key), SnapshotsTable(key), IndexTable(key), Payloads(key), _timeProvider, options.InBandMarkers, options.TombstoneRetention);
+                EventsTable(key), SnapshotsTable(key), IndexTable(key), AllIndexTable(key), Payloads(key),
+                _timeProvider, options.InBandMarkers, options.TombstoneRetention);
         });
 
     /// <summary>
@@ -63,7 +64,8 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
     public AzureTablesIndexProjector CreateIndexProjector(string domain, string checkpointName = "azure-tables-index")
     {
         OptionsFor(domain); // validate the domain is registered
-        return new AzureTablesIndexProjector(GetStore(domain), IndexTable(domain), Checkpoints, $"{domain}:{checkpointName}");
+        return new AzureTablesIndexProjector(
+            (AzureTablesEventStore)GetStore(domain), IndexTable(domain), AllIndexTable(domain), Checkpoints, $"{domain}:{checkpointName}");
     }
 
     /// <inheritdoc />
@@ -82,6 +84,7 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
             await EventsTable(domain).CreateIfNotExistsAsync(ct).ConfigureAwait(false);
             await SnapshotsTable(domain).CreateIfNotExistsAsync(ct).ConfigureAwait(false);
             await IndexTable(domain).CreateIfNotExistsAsync(ct).ConfigureAwait(false);
+            await AllIndexTable(domain).CreateIfNotExistsAsync(ct).ConfigureAwait(false);
             await Container(domain).CreateIfNotExistsAsync(cancellationToken: ct).ConfigureAwait(false);
         }
     }
@@ -96,6 +99,8 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
     private TableClient SnapshotsTable(string domain) => _tables.GetTableClient(AzureTableNames.Snapshots(_prefix, domain));
 
     private TableClient IndexTable(string domain) => _tables.GetTableClient(AzureTableNames.Index(_prefix, domain));
+
+    private TableClient AllIndexTable(string domain) => _tables.GetTableClient(AzureTableNames.AllIndex(_prefix, domain));
 
     private BlobContainerClient Container(string domain) => _blobs.GetBlobContainerClient(AzureTableNames.Container(_prefix, domain));
 

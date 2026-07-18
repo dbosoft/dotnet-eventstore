@@ -36,12 +36,12 @@ public sealed class AzureTablesFaultInjectionTests(AzuriteContainerFixture conta
 
         // The data was truncated but the marker was lost.
         (await store.ReadAllOf("s1")).Select(e => e.StreamVersion).Should().Equal(3, 4, 5);
-        (await ReadAll(store)).Should().NotContain(e => e.EventType == SystemEventTypes.StreamTruncated);
+        (await ReadAll(provider, domain)).Should().NotContain(e => e.EventType == SystemEventTypes.StreamTruncated);
 
         // Retrying the same truncation recovers the missing marker.
         tablePolicy.ShouldFail = null;
         await maintenance.TruncateStreamAsync("s1", 3, force: true);
-        (await ReadAll(store)).Should().ContainSingle(e => e.EventType == SystemEventTypes.StreamTruncated);
+        (await ReadAll(provider, domain)).Should().ContainSingle(e => e.EventType == SystemEventTypes.StreamTruncated);
     }
 
     [Fact]
@@ -61,11 +61,11 @@ public sealed class AzureTablesFaultInjectionTests(AzuriteContainerFixture conta
 
         // The events were removed but the tombstone was lost.
         (await store.ReadAllOf("s1")).Should().BeEmpty();
-        (await ReadAll(store)).Should().NotContain(e => e.EventType == SystemEventTypes.StreamDeleted);
+        (await ReadAll(provider, domain)).Should().NotContain(e => e.EventType == SystemEventTypes.StreamDeleted);
 
         tablePolicy.ShouldFail = null;
         await maintenance.DeleteStreamAsync("s1", DeleteMode.Soft);
-        (await ReadAll(store)).Should().ContainSingle(e => e.EventType == SystemEventTypes.StreamDeleted);
+        (await ReadAll(provider, domain)).Should().ContainSingle(e => e.EventType == SystemEventTypes.StreamDeleted);
     }
 
     [Fact]
@@ -143,10 +143,12 @@ public sealed class AzureTablesFaultInjectionTests(AzuriteContainerFixture conta
         return (provider, domain, tables, blobs);
     }
 
-    private static async Task<List<StoredEvent>> ReadAll(IEventStore store)
+    private static async Task<List<StoredEvent>> ReadAll(AzureTablesEventStoreProvider provider, string domain)
     {
+        // ATS $all is index-backed; pump the projector so the read reflects the latest events.
+        await provider.CreateIndexProjector(domain).PumpAsync();
         var result = new List<StoredEvent>();
-        await foreach (var e in ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start))
+        await foreach (var e in ((IAllStreamReader)provider.GetStore(domain)).ReadAllAsync(GlobalPosition.Start))
             result.Add(e);
         return result;
     }

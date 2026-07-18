@@ -22,6 +22,22 @@ public abstract class EventStoreConformanceTests
     /// </summary>
     protected virtual ISnapshotStore? GetSnapshotStore(IEventStore store) => null;
 
+    /// <summary>
+    /// Lets a provider whose <c>$all</c> is eventually consistent (no
+    /// <see cref="StoreCapabilities.SynchronousAllReads"/>) catch its global read up before an
+    /// assertion. Synchronous providers leave it a no-op; the tests call it before every <c>$all</c> read.
+    /// </summary>
+    protected virtual Task SettleAllAsync() => Task.CompletedTask;
+
+    private async Task<List<StoredEvent>> ReadAll(IAllStreamReader reader, GlobalPosition from)
+    {
+        await SettleAllAsync();
+        var all = new List<StoredEvent>();
+        await foreach (var e in reader.ReadAllAsync(from))
+            all.Add(e);
+        return all;
+    }
+
     // ---- core: append + read ----
 
     [Fact]
@@ -302,9 +318,7 @@ public abstract class EventStoreConformanceTests
         await store.AppendToStreamAsync("b", ExpectedVersion.NoStream, Events(2));
         await store.AppendToStreamAsync("a", 2, Events(1));
 
-        var all = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
-            all.Add(e);
+        var all = await ReadAll(reader, GlobalPosition.Start);
 
         all.Should().HaveCount(5);
         all.Select(e => e.StreamId).Should().Equal("a", "a", "b", "b", "a");
@@ -319,13 +333,9 @@ public abstract class EventStoreConformanceTests
             return;
 
         await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(3));
-        var all = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
-            all.Add(e);
+        var all = await ReadAll(reader, GlobalPosition.Start);
 
-        var after = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(all[0].Position))
-            after.Add(e);
+        var after = await ReadAll(reader, all[0].Position);
 
         after.Should().HaveCount(2);
         after[0].Position.Should().Be(all[1].Position);
@@ -416,9 +426,7 @@ public abstract class EventStoreConformanceTests
 
         var position = await navigable.FindPositionAtAsync(DateTimeOffset.MinValue);
 
-        var all = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(position))
-            all.Add(e);
+        var all = await ReadAll(reader, position);
         all.Should().HaveCount(2);
     }
 
@@ -498,9 +506,7 @@ public abstract class EventStoreConformanceTests
         await snapshots.SaveAsync("s1", 3, Event("Snapshot").Data);
         await maintenance.TruncateStreamAsync("s1", 3);
 
-        var all = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
-            all.Add(e);
+        var all = await ReadAll(reader, GlobalPosition.Start);
 
         all.Should().Contain(e => e.EventType == SystemEventTypes.StreamTruncated);
     }
@@ -524,9 +530,7 @@ public abstract class EventStoreConformanceTests
         events[0].StreamVersion.Should().Be(1); // the slot survives — shape preserved
         events[0].Data.ToArray().Should().Equal(redacted);
 
-        var all = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
-            all.Add(e);
+        var all = await ReadAll(reader, GlobalPosition.Start);
         all.Should().Contain(e => e.EventType == SystemEventTypes.EventRedacted);
     }
 
@@ -596,9 +600,7 @@ public abstract class EventStoreConformanceTests
         await maintenance.DeleteStreamAsync("s1", DeleteMode.Soft);
 
         // Deleting an already-soft-deleted stream is a no-op: it must not re-emit a tombstone.
-        var all = new List<StoredEvent>();
-        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
-            all.Add(e);
+        var all = await ReadAll(reader, GlobalPosition.Start);
 
         all.Count(e => e.EventType == SystemEventTypes.StreamDeleted).Should().Be(1);
     }
@@ -635,10 +637,8 @@ public abstract class EventStoreConformanceTests
 
         failures.Should().BeEmpty();
 
-        var markers = 0;
-        await foreach (var e in reader.ReadAllAsync(GlobalPosition.Start))
-            if (e.EventType == SystemEventTypes.StreamDeleted)
-                markers++;
+        var markers = (await ReadAll(reader, GlobalPosition.Start))
+            .Count(e => e.EventType == SystemEventTypes.StreamDeleted);
         markers.Should().Be(streams);
     }
 }

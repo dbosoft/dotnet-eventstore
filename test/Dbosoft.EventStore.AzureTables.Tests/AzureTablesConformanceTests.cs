@@ -17,6 +17,11 @@ public sealed class AzureTablesConformanceTests(AzuriteContainerFixture containe
     protected override IEventStore CreateStore() => _store.Provider.GetStore(_store.Domain);
 
     protected override ISnapshotStore? GetSnapshotStore(IEventStore store) => _store.Provider.GetSnapshotStore(_store.Domain);
+
+    // ATS $all is eventually consistent (index-backed); pump the projector so a global-read assertion
+    // sees the latest events.
+    protected override Task SettleAllAsync() =>
+        ((AzureTablesEventStoreProvider)_store.Provider).CreateIndexProjector(_store.Domain).PumpAsync();
 }
 
 /// <summary>Runs the snapshot conformance suite against the Azure Table Storage provider.</summary>

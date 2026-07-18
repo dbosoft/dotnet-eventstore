@@ -464,25 +464,30 @@ to a stable hash. The checkpoint table is shared (the checkpoint store is one do
 - Reading a stream = a range query on RowKey prefix `"E"`. One partition scan, fast and cheap.
 
 **Snapshots:** separate table, PK = `StreamId`, RowKey = `(long.MaxValue - version).ToString("D19")`,
-so the newest snapshot is the first row.
+so the newest snapshot is the first row. The same reverse-key trick gives **descending reads
+server-side**: a per-stream index table (RowKey = `MaxValue - version`) turns a backward stream read
+into an ascending range scan instead of buffering the whole stream.
 
-**`$all` — shipped as a scan; the log-tail index is the scale optimization.** ATS reads are strongly
-consistent, so the simplest correct `$all` is a scan of the domain's events table (skip HEAD rows),
-ordered by a `Position` property — a **per-process monotonic tick** allocated at append, so a single
-process produces strictly increasing, totally-ordered positions. This is what ships. It is *correct*
-and passes the whole conformance suite; its cost is scanning the domain's events per `$all` read.
+**`$all` and the descending index — bus-driven projection.** Positions come from a **per-process
+monotonic tick** allocated at append, so a single process produces strictly increasing, totally-ordered
+positions (across processes they interleave — hence no `ExactCatchup`). Two secondary indexes are
+maintained by `AzureTablesIndexProjector`, which tails the source-of-truth event scan from a durable
+checkpoint (the same shape as a bus relay) and is idempotent:
 
-The **log-tail index** below removes that cost and is the planned optimization — a separate, sharded,
-time-bucketed index so `$all` is a bounded merge instead of a scan:
+- **Per-stream descending index** (RowKey = reverse version) → backward `ReadStreamAsync` = index range
+  scan for the body + an events-table range read for the not-yet-indexed newest tail. Truncate/delete
+  markers prune the index; redaction is reflected by dereferencing the live row.
+- **`$all` time-bucket index** (PartitionKey = a coarse time bucket of the position, RowKey = position)
+  → `ReadAllAsync` from a position is a bounded partition-range scan of the index, not a full events
+  scan. **Sharded buckets, not a single `$all` key** — MS warns about the log-tail hot-spot.
 
-- **Forward** ticks in the RowKey (ATS sorts ascending; a catch-up reader wants oldest-first).
-- **Stamp the tick late and re-stamp on retry**, to keep Δ small (D3).
-- **Sharded buckets, not a single `$all` key** (PartitionKey = time bucket + shard); the reader merges
-  N tick-ordered buckets. MS warns about the log-tail hot-spot; the cost is a merge loop.
-- **Atomicity:** the index entry lives in a different partition than the event, so no EGT spans both —
-  Microsoft's *eventually consistent transactions pattern* (stream partition is the truth, index
-  written idempotently after, a repair sweep closes the crash window). Because it is not dense either,
-  it does **not** buy `ExactCatchup`; it buys read efficiency.
+Because the index is built asynchronously, the `$all` read is **eventually consistent**: an event
+appears once indexed, so ATS does **not** declare `SynchronousAllReads` (which InMemory and EF Core do,
+scanning the source directly). A consumer that needs an event *now* re-reads; a relay tails and does
+not care. **Atomicity:** the index entries live in different partitions than the event, so no EGT spans
+both — Microsoft's *eventually consistent transactions pattern*, the projector being the "written
+idempotently after" step. If the projector never runs, backward reads fall back to the events-table
+scan and `$all` is empty until it does — always correct, never blocking a write.
 
 **Alternatives considered and rejected (for a dense global sequence):**
 
@@ -495,8 +500,9 @@ time-bucketed index so `$all` is a bounded merge instead of a scan:
 | No `$all` on ATS at all | The honest fallback: per-stream reads only. Costs cross-stream read models on ATS entirely. Kept in reserve if the index proves unworkable. |
 
 ⇒ ATS declares `AllStreamReads | TimeNavigation | Truncation | StreamDeletion | SnapshotHistory |
-Redaction` — the same set as the relational provider — but **not** `MultiStreamAtomicAppend` and
-**not** `ExactCatchup` (the monotonic position is per-process, so consumers de-duplicate by `EventId`).
+Redaction`, but **not** `MultiStreamAtomicAppend`, **not** `ExactCatchup` (the monotonic position is
+per-process, so consumers de-duplicate by `EventId`), and **not** `SynchronousAllReads` (the global
+read is served from the asynchronously-built index).
 
 **Large payloads → blobs.** Each domain has a blob container. A payload field small enough stays inline
 in the entity; a field over the inline limit is written to a blob and the entity keeps a reference, so

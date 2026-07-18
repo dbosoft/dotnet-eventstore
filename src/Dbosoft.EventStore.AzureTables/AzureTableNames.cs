@@ -18,6 +18,8 @@ internal static class AzureTableNames
 
     public static string Index(string prefix, string domain) => Compose(prefix, domain, "Index");
 
+    public static string AllIndex(string prefix, string domain) => Compose(prefix, domain, "AllIndex");
+
     public static string Checkpoints(string prefix) => (prefix.Length == 0 ? "Es" : prefix) + "Checkpoints";
 
     // The blob container holding large payloads for a domain. Container names are lowercase; the token

@@ -18,6 +18,7 @@ internal sealed class AzureTablesEventStore(
     TableClient eventsTable,
     TableClient snapshots,
     TableClient indexTable,
+    TableClient allIndexTable,
     PayloadStore payloads,
     TimeProvider timeProvider,
     bool inBandMarkers,
@@ -252,6 +253,10 @@ internal sealed class AzureTablesEventStore(
                 Metadata: null);
     }
 
+    // The public global read is served from the $all index, which is built asynchronously by
+    // AzureTablesIndexProjector — so it is eventually consistent (the store does not declare
+    // SynchronousAllReads) and a catch-up from a position is a bounded partition-range scan of the
+    // index rather than a full scan of every event.
     public async IAsyncEnumerable<StoredEvent> ReadAllAsync(
         GlobalPosition from,
         ReadDirection direction = ReadDirection.Forwards,
@@ -263,20 +268,51 @@ internal sealed class AzureTablesEventStore(
             yield break;
 
         var forwards = direction == ReadDirection.Forwards;
+        var bucket = TableSchema.AllIndexBucket(from);
+        var filter = forwards ? $"PartitionKey ge '{bucket}'" : $"PartitionKey le '{bucket}'";
+
+        var rows = new List<TableEntity>();
+        await foreach (var index in allIndexTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+        {
+            var compare = string.CompareOrdinal(index.RowKey, from.Token);
+            if (forwards ? compare > 0 : compare < 0)
+                rows.Add(index);
+        }
+
+        // Rows arrive in (bucket, position) order = global position order; reverse for a backward read.
+        if (!forwards)
+            rows.Reverse();
+
+        var count = 0;
+        foreach (var index in rows)
+        {
+            var (streamId, version) = TableSchema.AllIndexTarget(index);
+            var response = await eventsTable
+                .GetEntityIfExistsAsync<TableEntity>(streamId, TableSchema.EventRowKey(version), cancellationToken: ct)
+                .ConfigureAwait(false);
+            if (!response.HasValue || await TryMaterializeAsync(response.Value!, ct).ConfigureAwait(false) is not { } stored)
+                continue;
+            yield return stored;
+            if (++count >= take)
+                yield break;
+        }
+    }
+
+    // A strongly-consistent forward scan of the domain's events in position order — the source of truth
+    // the index projector tails to build the per-stream and $all indexes.
+    internal async IAsyncEnumerable<StoredEvent> ScanAllAsync(
+        GlobalPosition from,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
         var selected = new List<TableEntity>();
         await foreach (var entity in eventsTable.QueryAsync<TableEntity>(cancellationToken: ct).ConfigureAwait(false))
         {
-            if (TableSchema.IsHead(entity))
-                continue;
-            var position = TableSchema.Position(entity);
-            if (forwards ? position > from : position < from)
+            if (!TableSchema.IsHead(entity) && TableSchema.Position(entity) > from)
                 selected.Add(entity);
         }
 
-        selected.Sort((a, b) => forwards
-            ? TableSchema.Position(a).CompareTo(TableSchema.Position(b))
-            : TableSchema.Position(b).CompareTo(TableSchema.Position(a)));
-        foreach (var entity in selected.Take(take))
+        selected.Sort((a, b) => TableSchema.Position(a).CompareTo(TableSchema.Position(b)));
+        foreach (var entity in selected)
             if (await TryMaterializeAsync(entity, ct).ConfigureAwait(false) is { } stored)
                 yield return stored;
     }

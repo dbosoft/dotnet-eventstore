@@ -41,6 +41,7 @@ public sealed class InMemoryEventStore
     public StoreCapabilities Capabilities =>
         StoreCapabilities.AllStreamReads
         | StoreCapabilities.ExactCatchup
+        | StoreCapabilities.SynchronousAllReads
         | StoreCapabilities.TimeNavigation
         | StoreCapabilities.Truncation
         | StoreCapabilities.StreamDeletion

@@ -119,6 +119,23 @@ internal static class TableSchema
 
     public static long IndexedVersion(TableEntity entity) => entity.GetInt64("Version") ?? 0;
 
+    // --- $all index: partitioned by a coarse time bucket of the position, row-keyed by the position,
+    // so a catch-up read from a position is a bounded partition-range scan instead of a full table scan ---
+
+    public static string AllIndexBucket(GlobalPosition position)
+    {
+        if (position == GlobalPosition.End)
+            return "9999999999";
+        var tick = string.IsNullOrEmpty(position.Token) ? 0L : long.Parse(position.Token, CultureInfo.InvariantCulture);
+        return (tick / TimeSpan.TicksPerHour).ToString("D10", CultureInfo.InvariantCulture);
+    }
+
+    public static TableEntity AllIndexEntity(GlobalPosition position, string streamId, long version) =>
+        new(AllIndexBucket(position), position.Token) { ["StreamId"] = streamId, ["Version"] = version };
+
+    public static (string StreamId, long Version) AllIndexTarget(TableEntity entity) =>
+        (Required(entity, "StreamId"), entity.GetInt64("Version") ?? 0);
+
     // --- snapshot entity (reverse-version row key, so the newest snapshot sorts first) ---
 
     public static string SnapshotRowKey(long version) =>

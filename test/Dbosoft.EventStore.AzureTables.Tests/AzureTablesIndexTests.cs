@@ -73,6 +73,36 @@ public sealed class AzureTablesIndexTests(AzuriteContainerFixture container) : I
         read[^1].Data.ToArray().Should().Equal(scrubbed);
     }
 
+    [Fact]
+    public async Task All_read_is_index_backed_and_complete_after_projection()
+    {
+        var store = Provider.GetStore(_store.Domain);
+        var reader = (IAllStreamReader)store;
+        var projector = Provider.CreateIndexProjector(_store.Domain);
+
+        store.Capabilities.HasFlag(StoreCapabilities.SynchronousAllReads).Should().BeFalse();
+
+        await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(2));
+        await store.AppendToStreamAsync("b", ExpectedVersion.NoStream, Events(2));
+
+        // Eventually consistent: nothing is in $all until the projector indexes it.
+        (await ReadAll(reader)).Should().BeEmpty();
+
+        await projector.PumpAsync();
+
+        var all = await ReadAll(reader);
+        all.Select(e => e.StreamId).Should().Equal("a", "a", "b", "b");
+        all.Select(e => e.Position).Should().BeInAscendingOrder();
+    }
+
+    private static async Task<List<StoredEvent>> ReadAll(IAllStreamReader reader)
+    {
+        var result = new List<StoredEvent>();
+        await foreach (var stored in reader.ReadAllAsync(GlobalPosition.Start))
+            result.Add(stored);
+        return result;
+    }
+
     private static async Task<List<StoredEvent>> ReadBackwards(IEventStore store, string streamId)
     {
         var result = new List<StoredEvent>();
