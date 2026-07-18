@@ -15,28 +15,43 @@ internal sealed class EfCoreSnapshotStore(
         string contentType = "application/json",
         CancellationToken ct = default)
     {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var existing = await ctx.Snapshots.FindAsync([domain, streamId, streamVersion], ct).ConfigureAwait(false);
-        if (existing is null)
+        // Find-then-upsert. Two writers crossing the snapshot boundary for the same (stream, version)
+        // concurrently would collide on the primary key; retry, where the loser updates instead (last
+        // wins — a snapshot is disposable derived data, so either payload is fine).
+        const int maxAttempts = 3;
+        for (var attempt = 1; ; attempt++)
         {
-            ctx.Snapshots.Add(new SnapshotRow
+            await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            var existing = await ctx.Snapshots.FindAsync([domain, streamId, streamVersion], ct).ConfigureAwait(false);
+            if (existing is null)
             {
-                Domain = domain,
-                StreamId = streamId,
-                StreamVersion = streamVersion,
-                Payload = payload.ToArray(),
-                ContentType = contentType,
-                CreatedAt = timeProvider.GetUtcNow()
-            });
-        }
-        else
-        {
-            existing.Payload = payload.ToArray();
-            existing.ContentType = contentType;
-            existing.CreatedAt = timeProvider.GetUtcNow();
-        }
+                ctx.Snapshots.Add(new SnapshotRow
+                {
+                    Domain = domain,
+                    StreamId = streamId,
+                    StreamVersion = streamVersion,
+                    Payload = payload.ToArray(),
+                    ContentType = contentType,
+                    CreatedAt = timeProvider.GetUtcNow()
+                });
+            }
+            else
+            {
+                existing.Payload = payload.ToArray();
+                existing.ContentType = contentType;
+                existing.CreatedAt = timeProvider.GetUtcNow();
+            }
 
-        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (DbUpdateException) when (attempt < maxAttempts)
+            {
+                // A concurrent writer inserted the row first — retry as an update.
+            }
+        }
     }
 
     public Task<StoredSnapshot?> LoadLatestAsync(string streamId, CancellationToken ct = default) =>

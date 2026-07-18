@@ -11,7 +11,11 @@ public sealed record ScavengeOptions
     /// </summary>
     public bool ApplyRetention { get; init; } = true;
 
-    /// <summary>Upper bound on streams processed in this pass; <c>null</c> for no limit.</summary>
+    /// <summary>
+    /// Reserved: an upper bound on streams processed in one pass, for chunking a large scavenge. No
+    /// provider bounds its work by this yet; today a scavenge only reclaims expired <c>$system</c>
+    /// tombstones, which is cheap enough not to need chunking.
+    /// </summary>
     public int? MaxStreams { get; init; }
 }
 

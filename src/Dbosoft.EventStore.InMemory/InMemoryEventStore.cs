@@ -41,7 +41,6 @@ public sealed class InMemoryEventStore
     public StoreCapabilities Capabilities =>
         StoreCapabilities.AllStreamReads
         | StoreCapabilities.ExactCatchup
-        | StoreCapabilities.MultiStreamAtomicAppend
         | StoreCapabilities.TimeNavigation
         | StoreCapabilities.Truncation
         | StoreCapabilities.StreamDeletion
@@ -61,14 +60,15 @@ public sealed class InMemoryEventStore
 
         lock (_gate)
         {
-            if (!_streams.TryGetValue(streamId, out var state))
-            {
-                state = new StreamState();
-                _streams[streamId] = state;
-            }
+            _streams.TryGetValue(streamId, out var state);
 
-            if (state.HardDeleted)
+            if (state is { HardDeleted: true })
                 throw new StreamDeletedException(streamId);
+
+            // An empty append is a no-op: report the current version and touch nothing, so it never
+            // materializes a stream or clears a soft-deletion.
+            if (events.Count == 0)
+                return Task.FromResult(new AppendResult(state?.Version ?? 0, null));
 
             var batchIds = new HashSet<Guid>();
             foreach (var evt in events)
@@ -78,24 +78,34 @@ public sealed class InMemoryEventStore
                         $"The append to stream '{streamId}' contains EventId {evt.EventId} more than once.");
             }
 
-            // Idempotency is scoped to the whole batch: an exact replay of an already-stored batch is
-            // a no-op, a partial overlap is an error, and a fully new batch proceeds. Dedup only holds
-            // while the events are retained (truncation drops their ids).
-            var present = events.Count(evt => state.EventIds.Contains(evt.EventId));
-            if (present == events.Count && events.Count > 0)
+            if (state is not null)
             {
-                var replayed = state.Events.Where(e => batchIds.Contains(e.EventId)).MaxBy(e => e.StreamVersion);
-                return replayed is null ? throw new InvalidOperationException($"Idempotency records for stream '{streamId}' are inconsistent.") :
-                    // Return the outcome of the original append operation, not the current head.
-                    Task.FromResult(new AppendResult(replayed.StreamVersion, replayed.Position));
+                // Idempotency is scoped to the whole batch: an exact replay of an already-stored batch is
+                // a no-op, a partial overlap is an error, and a fully new batch proceeds. Dedup only holds
+                // while the events are retained (truncation drops their ids).
+                var present = events.Count(evt => state.EventIds.Contains(evt.EventId));
+                if (present == events.Count)
+                {
+                    var replayed = state.Events.Where(e => batchIds.Contains(e.EventId)).MaxBy(e => e.StreamVersion);
+                    return replayed is null ? throw new InvalidOperationException($"Idempotency records for stream '{streamId}' are inconsistent.") :
+                        // Return the outcome of the original append operation, not the current head.
+                        Task.FromResult(new AppendResult(replayed.StreamVersion, replayed.Position));
+                }
+
+                if (present > 0)
+                    throw new InvalidOperationException(
+                        $"The append to stream '{streamId}' partially overlaps events already stored; an append "
+                        + "must be either entirely new or an exact replay of a prior batch.");
             }
 
-            if (present > 0)
-                throw new InvalidOperationException(
-                    $"The append to stream '{streamId}' partially overlaps events already stored; an append "
-                    + "must be either entirely new or an exact replay of a prior batch.");
+            EnsureExpectedVersion(streamId, expectedVersion, state?.Version ?? 0);
 
-            EnsureExpectedVersion(streamId, expectedVersion, state.Version);
+            // Validation passed — only now materialize the stream, so a rejected append leaves no trace.
+            if (state is null)
+            {
+                state = new StreamState();
+                _streams[streamId] = state;
+            }
 
             foreach (var evt in events)
             {
@@ -223,13 +233,15 @@ public sealed class InMemoryEventStore
             // boundary never runs beyond the end of the stream.
             beforeVersion = Math.Min(beforeVersion, state.Version + 1);
 
+            // A truncation that would remove nothing is a no-op — checked before the snapshot-coverage
+            // guard, so repeating it never fails just because the covering snapshot was later pruned.
+            if (beforeVersion <= state.TruncatedBefore)
+                return Task.CompletedTask;
+
             if (!force && LatestSnapshotVersion(streamId) < beforeVersion - 1)
                 throw new NotSupportedByProviderException(
                     $"Truncating stream '{streamId}' before version {beforeVersion} would leave it "
                     + "impossible to reconstruct: no snapshot at or after that boundary exists. Pass force to override.");
-
-            if (beforeVersion <= state.TruncatedBefore)
-                return Task.CompletedTask;
 
             // Drop the truncated events and their idempotency records: dedup only holds while events
             // are retained, so a re-append of a truncated batch is treated as new (matching a provider
@@ -323,8 +335,7 @@ public sealed class InMemoryEventStore
                 _all.RemoveAll(e => e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < cutoff);
             }
 
-            var processed = options?.MaxStreams is { } max ? Math.Min(_streams.Count, max) : _streams.Count;
-            return Task.FromResult(new ScavengeReport(processed, removed));
+            return Task.FromResult(new ScavengeReport(_streams.Count, removed));
         }
     }
 

@@ -1,13 +1,37 @@
 using AwesomeAssertions;
 using Dbosoft.EventStore.DependencyInjection;
 using Dbosoft.EventStore.InMemory;
+using Dbosoft.EventStore.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Dbosoft.EventStore.Tests;
 
+// A second event type used to prove the default domain keeps every registration.
+file sealed record Escalated;
+
 public sealed class RegistrationTests
 {
+    [Fact]
+    public void Default_domain_keeps_types_from_add_domain_and_convenience_methods_together()
+    {
+        var services = new ServiceCollection();
+        services.AddEventStore(es => es
+            .UseInMemory()
+            .AddDomain(EventStoreBuilder.DefaultDomainName, d => d.AddEventType<Incremented>())
+            .AddEventType<Escalated>());
+
+        using var sp = services.BuildServiceProvider();
+        var materializer = sp.GetRequiredKeyedService<IEventMaterializer>(EventStoreBuilder.DefaultDomainName);
+
+        // Both the AddDomain-registered type and the convenience-registered type must be known: the
+        // convenience method must extend the same default domain, not replace its materializer.
+        var fromAddDomain = () => materializer.Dematerialize(new Incremented(1));
+        var fromConvenience = () => materializer.Dematerialize(new Escalated());
+        fromAddDomain.Should().NotThrow();
+        fromConvenience.Should().NotThrow();
+    }
+
     [Fact]
     public void In_band_markers_combined_with_an_aggregate_repository_is_rejected()
     {

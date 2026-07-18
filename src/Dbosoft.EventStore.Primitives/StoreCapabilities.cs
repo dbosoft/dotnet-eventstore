@@ -26,7 +26,10 @@ public enum StoreCapabilities
     /// </summary>
     ExactCatchup = 1 << 2,
 
-    /// <summary>Events for several streams can be appended in one atomic operation.</summary>
+    /// <summary>
+    /// Reserved: events for several streams appended in one atomic operation. No append API for this
+    /// exists yet, so no provider declares it; the flag is kept for when a multi-stream append is added.
+    /// </summary>
     MultiStreamAtomicAppend = 1 << 3,
 
     /// <summary>A position can be located from a wall-clock timestamp.</summary>

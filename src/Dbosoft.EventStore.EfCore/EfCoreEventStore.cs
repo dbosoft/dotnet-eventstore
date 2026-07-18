@@ -45,91 +45,117 @@ internal sealed class EfCoreEventStore(
                     $"The append to stream '{streamId}' contains EventId {evt.EventId} more than once.");
         }
 
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-
-        var existing = await ctx.Events
-            .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
-            .Select(e => new { e.EventId, e.StreamVersion, e.Position })
-            .ToListAsync(ct).ConfigureAwait(false);
-
-        if (existing.Count == events.Count && events.Count > 0)
+        if (events.Count == 0)
         {
-            // Exact replay of an already-stored batch: return the outcome of the original append operation.
-            var last = existing.MaxBy(e => e.StreamVersion)!;
-            return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+            // An empty append is a no-op: report the current version and touch nothing, so it never
+            // materializes a stream or clears a soft-deletion.
+            await using var peek = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            var peekHead = await peek.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
+            if (peekHead is { HardDeleted: true })
+                throw new StreamDeletedException(streamId);
+            return new AppendResult(peekHead?.Version ?? 0, null);
         }
 
-        if (existing.Count > 0)
-            throw new InvalidOperationException(
-                $"The append to stream '{streamId}' partially overlaps events already stored; an append "
-                + "must be either entirely new or an exact replay of a prior batch.");
-
-        var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
-        if (head is { HardDeleted: true })
-            throw new StreamDeletedException(streamId);
-
-        var current = head?.Version ?? 0;
-        EnsureExpectedVersion(streamId, expectedVersion, current);
-
-        var version = current;
-        EventRow? lastRow = null;
-        foreach (var evt in events)
+        // A lost race is detected at commit as a unique-index violation and classified by re-reading.
+        // With ExpectedVersion.Any (or a satisfied StreamExists) the caller does not care which version
+        // it lands on, so a version conflict is retried against the new head rather than surfaced.
+        const int maxAttempts = 64;
+        for (var attempt = 1; ; attempt++)
         {
-            version++;
-            lastRow = new EventRow
-            {
-                Domain = domain,
-                StreamId = streamId,
-                StreamVersion = version,
-                EventId = evt.EventId,
-                EventType = evt.EventType,
-                Data = evt.Data.ToArray(),
-                Metadata = evt.Metadata?.ToArray(),
-                ContentType = evt.ContentType,
-                CreatedAt = timeProvider.GetUtcNow()
-            };
-            ctx.Events.Add(lastRow);
-        }
+            await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
-        if (head is null)
-            ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = streamId, Version = version });
-        else
-        {
-            head.Version = version;
-            head.IsDeleted = false;
-        }
-
-        try
-        {
-            await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is DbUpdateConcurrencyException or DbUpdateException)
-        {
-            // The save failed. Rather than depend on provider-specific error codes to tell a unique-index
-            // violation from anything else, re-read and classify by the resulting state: the same batch
-            // now fully present is a concurrent idempotent replay; an advanced head is a version conflict;
-            // an unchanged head means the failure was not concurrency-related, so surface it unmasked.
-            await using var check = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-            var stored = await check.Events
+            var existing = await ctx.Events
                 .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
                 .Select(e => new { e.StreamVersion, e.Position })
                 .ToListAsync(ct).ConfigureAwait(false);
 
-            if (stored.Count == events.Count)
+            if (existing.Count == events.Count)
             {
-                var last = stored.MaxBy(e => e.StreamVersion)!;
+                // Exact replay of an already-stored batch: return the outcome of the original append.
+                var last = existing.MaxBy(e => e.StreamVersion)!;
                 return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
             }
 
-            var actual = await CurrentVersionAsync(streamId, ct).ConfigureAwait(false);
-            if (stored.Count == 0 && actual == current)
-                throw;
+            if (existing.Count > 0)
+                throw new InvalidOperationException(
+                    $"The append to stream '{streamId}' partially overlaps events already stored; an append "
+                    + "must be either entirely new or an exact replay of a prior batch.");
 
-            throw new WrongExpectedVersionException(streamId, expectedVersion, actual);
+            var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
+            if (head is { HardDeleted: true })
+                throw new StreamDeletedException(streamId);
+
+            var current = head?.Version ?? 0;
+            EnsureExpectedVersion(streamId, expectedVersion, current);
+
+            var version = current;
+            EventRow? lastRow = null;
+            foreach (var evt in events)
+            {
+                version++;
+                lastRow = new EventRow
+                {
+                    Domain = domain,
+                    StreamId = streamId,
+                    StreamVersion = version,
+                    EventId = evt.EventId,
+                    EventType = evt.EventType,
+                    Data = evt.Data.ToArray(),
+                    Metadata = evt.Metadata?.ToArray(),
+                    ContentType = evt.ContentType,
+                    CreatedAt = timeProvider.GetUtcNow()
+                };
+                ctx.Events.Add(lastRow);
+            }
+
+            if (head is null)
+                ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = streamId, Version = version });
+            else
+            {
+                head.Version = version;
+                head.IsDeleted = false;
+            }
+
+            try
+            {
+                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                return new AppendResult(version, GlobalPosition.FromSequence(lastRow!.Position));
+            }
+            catch (Exception ex) when (ex is DbUpdateConcurrencyException or DbUpdateException)
+            {
+                // The save failed. Rather than depend on provider-specific error codes to tell a unique-
+                // index violation from anything else, re-read and classify by the resulting state.
+                await using var check = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+                var stored = await check.Events
+                    .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
+                    .Select(e => new { e.StreamVersion, e.Position })
+                    .ToListAsync(ct).ConfigureAwait(false);
+
+                if (stored.Count == events.Count)
+                {
+                    // A concurrent writer stored this exact batch first: idempotent replay.
+                    var last = stored.MaxBy(e => e.StreamVersion)!;
+                    return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+                }
+
+                var actual = await CurrentVersionAsync(streamId, ct).ConfigureAwait(false);
+                if (stored.Count == 0 && actual == current)
+                    throw; // nothing changed and the batch is absent — not a concurrency conflict
+
+                // A genuine version conflict. Retry against the new head when the caller did not pin a
+                // specific version; otherwise report it.
+                if (IsVersionAgnostic(expectedVersion, actual) && attempt < maxAttempts)
+                    continue;
+
+                throw new WrongExpectedVersionException(streamId, expectedVersion, actual);
+            }
         }
-
-        return new AppendResult(version, lastRow is null ? null : GlobalPosition.FromSequence(lastRow.Position));
     }
+
+    // Whether the caller left the target version open, so a lost race can be retried rather than failed.
+    private static bool IsVersionAgnostic(long expectedVersion, long actualVersion) =>
+        expectedVersion == ExpectedVersion.Any
+        || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);
 
     public async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
         string streamId,
@@ -212,6 +238,11 @@ internal sealed class EfCoreEventStore(
         // never runs beyond the end of the stream.
         beforeVersion = Math.Min(beforeVersion, head.Version + 1);
 
+        // A truncation that would remove nothing is a no-op — checked before the snapshot-coverage guard,
+        // so repeating it never fails just because the covering snapshot was later pruned.
+        if (beforeVersion <= head.TruncatedBefore)
+            return;
+
         if (!force)
         {
             var covering = await LatestSnapshotVersionAsync(ctx, streamId, ct).ConfigureAwait(false);
@@ -220,9 +251,6 @@ internal sealed class EfCoreEventStore(
                     $"Truncating stream '{streamId}' before version {beforeVersion} would leave it impossible "
                     + "to reconstruct: no snapshot at or after that boundary exists. Pass force to override.");
         }
-
-        if (beforeVersion <= head.TruncatedBefore)
-            return;
 
         // The physical delete and the head/marker update must be all-or-nothing: without a wrapping
         // transaction, ExecuteDelete commits on its own and a later failure would leave events gone
@@ -301,8 +329,7 @@ internal sealed class EfCoreEventStore(
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
 
         var streams = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
-        var processed = options?.MaxStreams is { } max ? Math.Min(streams, max) : streams;
-        return new ScavengeReport(processed, removed);
+        return new ScavengeReport(streams, removed);
     }
 
     private async Task EmitMarkerAsync(
@@ -371,7 +398,8 @@ internal sealed class EfCoreEventStore(
 
     private static long ToSequence(GlobalPosition position)
     {
-        if (position == GlobalPosition.Start)
+        // A defaulted position has a null token; treat it (and Start) as "before the first event".
+        if (position == GlobalPosition.Start || string.IsNullOrEmpty(position.Token))
             return 0;
         return position == GlobalPosition.End
             ? long.MaxValue

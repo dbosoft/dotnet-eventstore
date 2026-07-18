@@ -5,8 +5,9 @@ namespace Dbosoft.EventStore;
 /// bytes; interpreting them is the serialization layer's job.
 /// </summary>
 /// <param name="EventId">
-/// A stable identity for this event, used for idempotent appends and de-duplication on catch-up.
-/// Reusing an id that already exists in the target stream is a no-op rather than a duplicate.
+/// A stable identity for this event, used for batch-scoped idempotent appends and de-duplication on
+/// catch-up. Re-appending a batch whose ids are all already stored is a no-op that returns the
+/// original outcome; a batch that only partially overlaps stored events is rejected.
 /// </param>
 /// <param name="EventType">The logical type name a serializer maps to a CLR type.</param>
 /// <param name="Data">The serialized event payload.</param>

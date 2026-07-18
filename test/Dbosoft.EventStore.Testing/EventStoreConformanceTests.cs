@@ -173,6 +173,61 @@ public abstract class EventStoreConformanceTests
     }
 
     [Fact]
+    public async Task Empty_append_is_a_no_op_returning_the_current_version()
+    {
+        var store = CreateStore();
+
+        // On a missing stream: a no-op that leaves no trace — no phantom stream is materialized.
+        var onMissing = await store.AppendToStreamAsync("s1", ExpectedVersion.Any, []);
+        onMissing.NextExpectedVersion.Should().Be(0);
+        (await store.GetStreamInfoAsync("s1")).Should().BeNull();
+
+        // On an existing stream: reports the current version and writes nothing.
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+        var onExisting = await store.AppendToStreamAsync("s1", ExpectedVersion.Any, []);
+        onExisting.NextExpectedVersion.Should().Be(3);
+        (await store.ReadAllOf("s1")).Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task A_rejected_append_does_not_materialize_the_stream()
+    {
+        var store = CreateStore();
+
+        var act = () => store.AppendToStreamAsync("s1", ExpectedVersion.StreamExists, Events(1));
+        await act.Should().ThrowAsync<WrongExpectedVersionException>();
+
+        // A rejected append must leave no trace: the stream still does not exist.
+        (await store.GetStreamInfoAsync("s1")).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Concurrent_any_appends_of_different_batches_all_succeed()
+    {
+        var store = CreateStore();
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+
+        // ExpectedVersion.Any means "append regardless of the current version". Every racer must land;
+        // none may be rejected as a version conflict just because another writer moved the head first.
+        var failures = new ConcurrentBag<Exception>();
+        var racers = Enumerable.Range(0, 12).Select(_ => Task.Run(async () =>
+        {
+            try
+            {
+                await store.AppendToStreamAsync("s1", ExpectedVersion.Any, Events(1));
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }));
+        await Task.WhenAll(racers);
+
+        failures.Should().BeEmpty();
+        (await store.ReadAllOf("s1")).Should().HaveCount(13);
+    }
+
+    [Fact]
     public async Task Concurrent_appends_to_same_version_yield_exactly_one_winner()
     {
         var store = CreateStore();
@@ -514,21 +569,4 @@ public abstract class EventStoreConformanceTests
         all.Count(e => e.EventType == SystemEventTypes.StreamDeleted).Should().Be(1);
     }
 
-    // ---- optional: scavenge ----
-
-    [Fact]
-    public async Task Scavenge_honours_the_max_streams_bound()
-    {
-        var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance)
-            return;
-
-        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
-        await store.AppendToStreamAsync("s2", ExpectedVersion.NoStream, Events(1));
-        await store.AppendToStreamAsync("s3", ExpectedVersion.NoStream, Events(1));
-
-        var report = await maintenance.ScavengeAsync(new ScavengeOptions { MaxStreams = 1 });
-
-        report.StreamsProcessed.Should().BeLessThanOrEqualTo(1);
-    }
 }

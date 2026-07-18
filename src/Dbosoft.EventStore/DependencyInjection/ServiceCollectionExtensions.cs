@@ -24,9 +24,13 @@ public static class ServiceCollectionExtensions
         // Defaults registered after configure, so a caller's UseSerializer takes precedence.
         services.TryAddSingleton<IEventSerializer>(new SystemTextJsonEventSerializer());
 
-        foreach (var domain in builder.Domains)
+        // Validate and publish domains once, after all configuration — so a domain's final options and
+        // its full set of event types are seen, whichever methods contributed them.
+        foreach (var domain in builder.DomainBuilders)
         {
-            services.AddKeyedSingleton<IEventStore>(domain, (sp, key) =>
+            domain.Validate();
+            services.AddSingleton(new RegisteredDomain(domain.Name, domain.Options));
+            services.AddKeyedSingleton<IEventStore>(domain.Name, (sp, key) =>
                 sp.GetRequiredService<IEventStoreProvider>().GetStore((string)key!));
         }
 

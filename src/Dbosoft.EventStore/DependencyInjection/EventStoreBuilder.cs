@@ -19,14 +19,19 @@ public sealed class EventStoreBuilder
     /// <summary>The name of the implicit domain used by the top-level convenience methods.</summary>
     public const string DefaultDomainName = "default";
 
-    private readonly List<string> _domains = [];
+    private readonly Dictionary<string, DomainBuilder> _builders = new(StringComparer.Ordinal);
 
     internal EventStoreBuilder(IServiceCollection services) => Services = services;
 
     /// <summary>The underlying service collection, for providers and advanced wiring.</summary>
     public IServiceCollection Services { get; }
 
-    internal IReadOnlyCollection<string> Domains => _domains;
+    /// <summary>
+    /// The configured domain builders. Validation and domain publication happen once, at build time,
+    /// so the default domain is a single builder even when <see cref="AddDomain"/> and the convenience
+    /// methods both target it.
+    /// </summary>
+    internal IReadOnlyCollection<DomainBuilder> DomainBuilders => _builders.Values;
 
     /// <summary>
     /// Configures a domain — a group of related events mapped to its own storage unit, with its own
@@ -34,13 +39,12 @@ public sealed class EventStoreBuilder
     /// </summary>
     public EventStoreBuilder AddDomain(string name, Action<DomainBuilder> configure)
     {
-        if (_domains.Contains(name))
+        if (_builders.ContainsKey(name))
             throw new InvalidOperationException($"Domain '{name}' is already registered.");
 
         var domain = new DomainBuilder(name, Services);
+        _builders[name] = domain;
         configure(domain);
-        domain.Validate();
-        RegisterDomain(name, domain.Options);
         return this;
     }
 
@@ -120,24 +124,18 @@ public sealed class EventStoreBuilder
         return this;
     }
 
+    // The default domain reuses its one builder, whether it was first touched by AddDomain("default")
+    // or by a convenience method — so its event types and options never split across two registrations.
     private DomainBuilder Default
     {
         get
         {
-            if (field is not null)
-                return field;
+            if (_builders.TryGetValue(DefaultDomainName, out var existing))
+                return existing;
 
-            RegisterDomain(DefaultDomainName, new DomainOptions());
-            return field = new DomainBuilder(DefaultDomainName, Services);
+            var builder = new DomainBuilder(DefaultDomainName, Services);
+            _builders[DefaultDomainName] = builder;
+            return builder;
         }
-    }
-
-    private void RegisterDomain(string name, DomainOptions options)
-    {
-        if (_domains.Contains(name))
-            return;
-
-        _domains.Add(name);
-        Services.AddSingleton(new RegisteredDomain(name, options));
     }
 }

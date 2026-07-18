@@ -59,12 +59,22 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
 
         if (_snapshotStore is not null && aggregate is ISnapshotable snapshotable)
         {
-            var snapshot = await _snapshotStore.LoadLatestAsync(streamId, ct).ConfigureAwait(false);
-            if (snapshot is not null && TryDeserializeSnapshot(snapshotable, snapshot, out var state))
+            // Try the newest snapshot; if it no longer deserializes, fall back through older ones a
+            // SnapshotHistory provider still keeps, before giving up on snapshots entirely.
+            var upTo = long.MaxValue;
+            while (await _snapshotStore.LoadAtOrBeforeAsync(streamId, upTo, ct).ConfigureAwait(false) is { } snapshot)
             {
-                snapshotable.RestoreFromSnapshot(state, snapshot.StreamVersion);
-                restoredVersion = snapshot.StreamVersion;
-                exists = true;
+                if (TryDeserializeSnapshot(snapshotable, snapshot, out var state))
+                {
+                    snapshotable.RestoreFromSnapshot(state, snapshot.StreamVersion);
+                    restoredVersion = snapshot.StreamVersion;
+                    exists = true;
+                    break;
+                }
+
+                if (snapshot.StreamVersion <= 0)
+                    break;
+                upTo = snapshot.StreamVersion - 1;
             }
         }
 
@@ -75,17 +85,26 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
         if (truncatedBefore > 1 && restoredVersion < truncatedBefore - 1)
             throw new SnapshotRequiredException(streamId, truncatedBefore);
 
+        var expectedVersion = restoredVersion;
         await foreach (var stored in _store
                            .ReadStreamAsync(streamId, ReadDirection.Forwards, restoredVersion + 1, ct: ct)
                            .ConfigureAwait(false))
         {
-            exists = true;
-
-            // Safety net: system markers must never reach an aggregate's fold — they carry no state
-            // and would miscount the version. Aggregate domains use $system, so this is belt-and-braces.
+            // A system marker must never reach an aggregate's fold — it carries no state and would
+            // miscount the version. Aggregate domains keep markers on $system, so a marker on this
+            // stream is a misconfiguration; fail loudly rather than silently half-fold.
             if (SystemEventTypes.IsSystem(stored.EventType))
-                continue;
+                throw new InvalidOperationException(
+                    $"Stream '{streamId}' contains system event '{stored.EventType}', which cannot be folded "
+                    + $"into aggregate '{typeof(T).Name}'. Aggregate domains must not emit markers in-band.");
 
+            // The events must be contiguous from where we resumed; a gap means a truncation (possibly
+            // racing this load) removed events the snapshot does not cover, so the state is unrecoverable.
+            expectedVersion++;
+            if (stored.StreamVersion != expectedVersion)
+                throw new SnapshotRequiredException(streamId, stored.StreamVersion);
+
+            exists = true;
             aggregate.ReplayEvent(_materializer.Materialize(stored));
         }
 

@@ -170,7 +170,14 @@ One honesty caveat on the flag: gap detection abandons a hole after a bounded ti
 bounds append duration below it or documents the condition — a silently conditional guarantee is
 exactly what D1's capability honesty exists to prevent.
 
-⇒ EF Core declares `ExactCatchup`; ATS does not.
+⇒ Gap detection needs a **dense per-domain sequence**. The in-memory reference provider has one (a
+separate store instance per domain, so its sequence is gap-free) and declares `ExactCatchup`. The
+shipped EF Core layout does **not**: domains are an indexed discriminator over one `es_events` table
+with one shared identity column (§5), so a single domain's positions are sparse — the gaps are other
+domains' events, indistinguishable from missing ones. EF Core therefore does **not** declare
+`ExactCatchup` in v1; its catch-up reads are ordered and complete but consumers must de-duplicate by
+`EventId`. Restoring density (per-domain sequences, or table-per-domain) is the path to the flag on
+EF Core, and is left as a later option. ATS never had a dense sequence and does not declare it.
 
 ### D4 — The core only knows bytes
 
@@ -410,21 +417,32 @@ last one is missing in SAPId and is what retry logic needs.
   when `TimeNavigation` is enabled.
 - `Snapshots` — PK `(StreamId, StreamVersion)`.
 
-**Append without the race (fixes the #2 critique):** no `MaxAsync` pre-read. Instead:
+**Append without a pre-read race:** no `MaxAsync`. Two race-free schemes, composable:
 
-```sql
-UPDATE Streams SET Version = @new WHERE StreamId = @id AND Version = @expected
-```
+- **Default (any relational database):** the unique index `(Domain, StreamId, StreamVersion)` makes a
+  lost race a write-time constraint violation. The provider does not sniff provider-specific error
+  codes — on a failed `SaveChanges` it re-reads and classifies by the resulting state: the same batch
+  now fully present is an idempotent replay, an advanced head is a version conflict, and an unchanged
+  head is a genuine failure surfaced unmasked. With `ExpectedVersion.Any` (or a satisfied
+  `StreamExists`) a version conflict is retried against the new head rather than reported.
+- **Optional refinement — `UseVersionConcurrencyToken`:** map the head `Version` as a concurrency
+  token, so the head update carries `WHERE Version = @expected` and a lost race surfaces as a clean
+  `DbUpdateConcurrencyException`. Tidier on databases that support value concurrency tokens; the
+  unique index already makes append race-free without it.
 
-Zero rows affected means a conflict — deterministic, no exception sniffing, works on any relational
-database. The event rows follow in the same transaction. The `Streams` head deliberately mirrors
-the ATS `HEAD` entity (§6): one concept, two providers.
+The event rows and the head update commit in one transaction either way. The `Streams` head
+deliberately mirrors the ATS `HEAD` entity (§6): one concept, two providers.
 
 **Commits** are eager in v1: each append opens and commits its own transaction. Enlisting in a
 caller-owned transaction is the future unit-of-work context (D6), not part of the first cut.
 
-**`$all`:** `WHERE Position > @p ORDER BY Position` on the PK index, with gap detection per D3.
-Declares `ExactCatchup`.
+**`$all`:** `WHERE Domain = @d AND Position > @p ORDER BY Position`. Because domains are an indexed
+discriminator over one `es_events` table with one shared identity column, a single domain's positions
+are **not dense** — the gaps are other domains' events. Gap-detection-based `ExactCatchup` therefore
+does not apply to this layout: EF Core declares `AllStreamReads | TimeNavigation | Truncation |
+StreamDeletion | SnapshotHistory | Redaction`, but **not** `ExactCatchup`. Catch-up reads are still
+ordered and complete; a consumer needing exactness de-duplicates by `EventId` (a future per-domain
+sequence or table-per-domain layout would restore density).
 
 Tested against SQLite, SQL Server and PostgreSQL (Testcontainers).
 

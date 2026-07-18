@@ -15,11 +15,15 @@ public interface IEventStore
     /// <summary>
     /// Appends <paramref name="events"/> to the end of a stream, provided the stream is at
     /// <paramref name="expectedVersion"/> (see <see cref="ExpectedVersion"/> for the sentinels).
-    /// Appending is idempotent per <see cref="EventData.EventId"/>: an id already present in the
-    /// stream is not written twice.
+    /// Idempotency is scoped to the whole batch, keyed by <see cref="EventData.EventId"/>: re-appending
+    /// a batch whose ids are all already present is a no-op that returns the original outcome, a batch
+    /// that only partially overlaps stored events is rejected, and a duplicate id within one batch is
+    /// rejected. Dedup holds only while the events are retained (truncation drops their ids). An empty
+    /// batch is a no-op returning the current version.
     /// </summary>
     /// <exception cref="WrongExpectedVersionException">The stream is not at the expected version.</exception>
     /// <exception cref="StreamDeletedException">The stream has been hard-deleted.</exception>
+    /// <exception cref="InvalidOperationException">The batch partially overlaps stored events, or repeats an id.</exception>
     Task<AppendResult> AppendToStreamAsync(
         string streamId,
         long expectedVersion,
