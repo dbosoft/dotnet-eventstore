@@ -11,7 +11,7 @@ namespace Dbosoft.EventStore.InMemory;
 /// </summary>
 [PublicAPI]
 public sealed class InMemoryEventStore
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance
+    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
@@ -122,6 +122,105 @@ public sealed class InMemoryEventStore
             }
 
             return Task.FromResult(new AppendResult(state.Version, LastPosition(state)));
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<AppendResult>> AppendToStreamsAsync(
+        IReadOnlyList<StreamAppend> appends,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(appends);
+        ct.ThrowIfCancellationRequested();
+
+        lock (_gate)
+        {
+            var seenStreams = new HashSet<string>(StringComparer.Ordinal);
+            var plan = new (StreamAppend Append, StreamState? State, AppendResult? Settled)[appends.Count];
+
+            // Phase 1 — validate every entry against one consistent snapshot; mutate nothing, so any
+            // failure leaves the whole operation with no effect. The single lock makes it atomic.
+            for (var i = 0; i < appends.Count; i++)
+            {
+                var append = appends[i];
+                ArgumentException.ThrowIfNullOrEmpty(append.StreamId);
+                ArgumentNullException.ThrowIfNull(append.Events);
+                if (!seenStreams.Add(append.StreamId))
+                    throw new InvalidOperationException(
+                        $"Stream '{append.StreamId}' appears more than once in a multi-stream append.");
+
+                _streams.TryGetValue(append.StreamId, out var state);
+                if (state is { HardDeleted: true })
+                    throw new StreamDeletedException(append.StreamId);
+
+                var batchIds = new HashSet<Guid>();
+                foreach (var evt in append.Events)
+                {
+                    if (!batchIds.Add(evt.EventId))
+                        throw new InvalidOperationException(
+                            $"The append to stream '{append.StreamId}' contains EventId {evt.EventId} more than once.");
+                }
+
+                AppendResult? settled = null;
+                if (state is not null && append.Events.Count > 0)
+                {
+                    var present = append.Events.Count(evt => state.EventIds.Contains(evt.EventId));
+                    if (present == append.Events.Count)
+                    {
+                        var replayed = state.Events.Where(e => batchIds.Contains(e.EventId)).MaxBy(e => e.StreamVersion)
+                                       ?? throw new InvalidOperationException(
+                                           $"Idempotency records for stream '{append.StreamId}' are inconsistent.");
+                        settled = new AppendResult(replayed.StreamVersion, replayed.Position);
+                    }
+                    else if (present > 0)
+                        throw new InvalidOperationException(
+                            $"The append to stream '{append.StreamId}' partially overlaps events already stored; an "
+                            + "append must be either entirely new or an exact replay of a prior batch.");
+                }
+
+                if (settled is null)
+                {
+                    EnsureExpectedVersion(append.StreamId, append.ExpectedVersion, state?.Version ?? 0);
+                    if (append.Events.Count == 0)
+                        settled = new AppendResult(state?.Version ?? 0, null);
+                }
+
+                plan[i] = (append, state, settled);
+            }
+
+            // Phase 2 — apply. Validation passed, so nothing here can fail.
+            var results = new AppendResult[appends.Count];
+            for (var i = 0; i < plan.Length; i++)
+            {
+                var (append, state, settled) = plan[i];
+                if (settled is { } done)
+                {
+                    results[i] = done;
+                    continue;
+                }
+
+                if (state is null)
+                {
+                    state = new StreamState();
+                    _streams[append.StreamId] = state;
+                }
+
+                foreach (var evt in append.Events)
+                {
+                    var entry = new Entry(
+                        append.StreamId, state.Version + 1, ++_sequence, evt.EventId, evt.EventType,
+                        evt.Data, evt.Metadata, evt.ContentType, _timeProvider.GetUtcNow());
+                    state.Version = entry.StreamVersion;
+                    state.IsDeleted = false;
+                    state.Events.Add(entry);
+                    state.EventIds.Add(evt.EventId);
+                    _all.Add(entry);
+                }
+
+                results[i] = new AppendResult(state.Version, LastPosition(state));
+            }
+
+            return Task.FromResult<IReadOnlyList<AppendResult>>(results);
         }
     }
 

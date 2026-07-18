@@ -26,12 +26,6 @@ public enum StoreCapabilities
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
     SnapshotHistory = 1 << 1,
 
-    /// <summary>
-    /// Reserved: events for several streams appended in one atomic operation. Superseded by the
-    /// <c>IMultiStreamAppend</c> interface — kept until every provider is migrated off the flag.
-    /// </summary>
-    MultiStreamAtomicAppend = 1 << 2,
-
     /// <summary>Reserved: streams carry readable and writable metadata. No metadata API exists yet.</summary>
-    StreamMetadata = 1 << 3
+    StreamMetadata = 1 << 2
 }

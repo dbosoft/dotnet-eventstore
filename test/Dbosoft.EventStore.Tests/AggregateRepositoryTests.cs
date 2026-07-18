@@ -82,6 +82,48 @@ public sealed class AggregateRepositoryTests
     }
 
     [Fact]
+    public async Task SaveAll_persists_every_aggregate_atomically()
+    {
+        await using var sp = BuildProvider();
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+
+        var c1 = new Counter("c1");
+        c1.Increment(3);
+        var c2 = new Counter("c2");
+        c2.Increment(4);
+        c2.Increment(1);
+
+        await repo.SaveAllAsync([c1, c2]);
+
+        c1.UncommittedEvents.Should().BeEmpty();
+        c2.UncommittedEvents.Should().BeEmpty();
+        (await repo.LoadAsync("c1"))!.Value.Should().Be(3);
+        (await repo.LoadAsync("c2"))!.Value.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task SaveAll_is_atomic_when_one_aggregate_conflicts()
+    {
+        await using var sp = BuildProvider();
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+
+        var pre = new Counter("c2");
+        pre.Increment(9);
+        await repo.SaveAsync(pre); // c2 already exists at v1
+
+        var c1 = new Counter("c1");
+        c1.Increment(1);
+        var c2 = new Counter("c2");
+        c2.Increment(1); // expects an empty stream, but c2 is at v1
+
+        var act = () => repo.SaveAllAsync([c1, c2]);
+        await act.Should().ThrowAsync<WrongExpectedVersionException>();
+
+        // All-or-nothing: c1's events were not written despite being valid on their own.
+        (await repo.LoadAsync("c1")).Should().BeNull();
+    }
+
+    [Fact]
     public async Task Load_uses_snapshot_when_earlier_events_are_truncated()
     {
         await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5));

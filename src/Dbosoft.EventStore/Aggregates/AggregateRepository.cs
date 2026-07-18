@@ -139,6 +139,59 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
         }
     }
 
+    /// <inheritdoc />
+    public async Task SaveAllAsync(IReadOnlyList<T> aggregates, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(aggregates);
+
+        // Only aggregates with pending events take part; one with nothing to commit is skipped, just as
+        // SaveAsync returns early for it.
+        var pending = aggregates.Where(a => a.UncommittedEvents.Count > 0).ToList();
+        if (pending.Count == 0)
+            return;
+
+        if (_store is not IMultiStreamAppend multi)
+            throw new NotSupportedByProviderException(
+                $"The store '{_store.GetType().Name}' cannot append to multiple streams atomically, which "
+                + "SaveAllAsync requires. Save the aggregates individually if a non-atomic write is acceptable.");
+
+        var appends = new StreamAppend[pending.Count];
+        for (var i = 0; i < pending.Count; i++)
+        {
+            var aggregate = pending[i];
+            var events = aggregate.UncommittedEvents;
+            var versionBefore = aggregate.Version - events.Count;
+            var data = new EventData[events.Count];
+            for (var j = 0; j < events.Count; j++)
+                data[j] = _materializer.Dematerialize(events[j].Event, events[j].EventId);
+            appends[i] = new StreamAppend(StreamId(aggregate.Id), versionBefore, data);
+        }
+
+        await multi.AppendToStreamsAsync(appends, ct).ConfigureAwait(false);
+
+        // The events are durably committed. Mark every aggregate committed first, so a later
+        // (best-effort) snapshot failure can never leave an aggregate still holding events that are in
+        // fact persisted. Snapshots — disposable derived data — are written afterwards.
+        var snapshotWork = new List<(string StreamId, ISnapshotable Snapshotable, long Version)>();
+        foreach (var aggregate in pending)
+        {
+            var versionAfter = aggregate.Version;
+            var versionBefore = versionAfter - aggregate.UncommittedEvents.Count;
+            aggregate.MarkCommitted();
+
+            if (_snapshotStore is not null
+                && aggregate is ISnapshotable snapshotable
+                && _snapshotPolicy.ShouldSnapshot(versionBefore, versionAfter))
+                snapshotWork.Add((StreamId(aggregate.Id), snapshotable, versionAfter));
+        }
+
+        foreach (var (streamId, snapshotable, version) in snapshotWork)
+        {
+            var state = _serializer.Serialize(snapshotable.CreateSnapshotState());
+            await _snapshotStore!.SaveAsync(streamId, version, state, _serializer.ContentType, ct).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>
     /// Deserializes a snapshot's state, treating any failure as "no usable snapshot". A snapshot is
     /// disposable derived data, so a schema-incompatible or corrupt one must never fail a load — the

@@ -635,4 +635,160 @@ public abstract class EventStoreConformanceTests
             .Count(e => e.EventType == SystemEventTypes.StreamDeleted);
         markers.Should().Be(streams);
     }
+
+    // ---- optional: multi-stream atomic append ----
+
+    [Fact]
+    public async Task Multi_stream_append_writes_every_stream()
+    {
+        var store = CreateStore();
+        if (store is not IMultiStreamAppend multi)
+            return;
+
+        var results = await multi.AppendToStreamsAsync(
+        [
+            new StreamAppend("a", ExpectedVersion.NoStream, Events(2)),
+            new StreamAppend("b", ExpectedVersion.NoStream, Events(3))
+        ]);
+
+        results.Should().HaveCount(2);
+        results[0].NextExpectedVersion.Should().Be(2);
+        results[1].NextExpectedVersion.Should().Be(3);
+        (await store.ReadAllOf("a")).Should().HaveCount(2);
+        (await store.ReadAllOf("b")).Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task Multi_stream_append_is_all_or_nothing_on_a_version_conflict()
+    {
+        var store = CreateStore();
+        if (store is not IMultiStreamAppend multi)
+            return;
+
+        await store.AppendToStreamAsync("b", ExpectedVersion.NoStream, Events(1)); // b is now at v1
+
+        // "a" is appendable, but "b" is expected at NoStream while it is at v1 — the whole batch must fail.
+        var act = () => multi.AppendToStreamsAsync(
+        [
+            new StreamAppend("a", ExpectedVersion.NoStream, Events(2)),
+            new StreamAppend("b", ExpectedVersion.NoStream, Events(1))
+        ]);
+
+        await act.Should().ThrowAsync<WrongExpectedVersionException>();
+
+        // Nothing from the rejected batch was written: "a" must not exist and "b" stays at v1.
+        (await store.GetStreamInfoAsync("a")).Should().BeNull();
+        (await store.ReadAllOf("b")).Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Multi_stream_append_is_idempotent_on_replay()
+    {
+        var store = CreateStore();
+        if (store is not IMultiStreamAppend multi)
+            return;
+
+        var batchA = Events(2);
+        var batchB = Events(1);
+        var first = await multi.AppendToStreamsAsync(
+        [
+            new StreamAppend("a", ExpectedVersion.NoStream, batchA),
+            new StreamAppend("b", ExpectedVersion.NoStream, batchB)
+        ]);
+        var second = await multi.AppendToStreamsAsync(
+        [
+            new StreamAppend("a", ExpectedVersion.NoStream, batchA),
+            new StreamAppend("b", ExpectedVersion.NoStream, batchB)
+        ]);
+
+        second[0].NextExpectedVersion.Should().Be(first[0].NextExpectedVersion);
+        second[1].NextExpectedVersion.Should().Be(first[1].NextExpectedVersion);
+        (await store.ReadAllOf("a")).Should().HaveCount(2); // not duplicated
+        (await store.ReadAllOf("b")).Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Multi_stream_append_checks_the_expected_version_of_an_empty_entry()
+    {
+        var store = CreateStore();
+        if (store is not IMultiStreamAppend multi)
+            return;
+
+        await store.AppendToStreamAsync("b", ExpectedVersion.NoStream, Events(1)); // b is now at v1
+
+        // The empty entry for "b" expects NoStream while it is at v1 — the whole batch must be rejected
+        // (an empty append is still a checked no-op), and the valid append to "a" must not land.
+        var act = () => multi.AppendToStreamsAsync(
+        [
+            new StreamAppend("a", ExpectedVersion.NoStream, Events(2)),
+            new StreamAppend("b", ExpectedVersion.NoStream, [])
+        ]);
+
+        await act.Should().ThrowAsync<WrongExpectedVersionException>();
+        (await store.GetStreamInfoAsync("a")).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Concurrent_identical_multi_stream_appends_are_idempotent()
+    {
+        var store = CreateStore();
+        if (store is not IMultiStreamAppend multi)
+            return;
+
+        var batchA = Events(2);
+        var batchB = Events(3);
+        StreamAppend[] Batch() =>
+        [
+            new("a", ExpectedVersion.NoStream, batchA),
+            new("b", ExpectedVersion.NoStream, batchB)
+        ];
+
+        var failures = new ConcurrentBag<Exception>();
+        async Task Run()
+        {
+            try
+            {
+                await multi.AppendToStreamsAsync(Batch());
+            }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+            }
+        }
+
+        await Task.WhenAll(Task.Run(Run), Task.Run(Run));
+
+        // Identical batches: both calls succeed (the loser reconciles to an idempotent replay) and
+        // neither stream is duplicated.
+        failures.Should().BeEmpty();
+        (await store.ReadAllOf("a")).Should().HaveCount(2);
+        (await store.ReadAllOf("b")).Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task Concurrent_conflicting_multi_stream_appends_leave_one_winner()
+    {
+        var store = CreateStore();
+        if (store is not IMultiStreamAppend multi)
+            return;
+
+        async Task<bool> TryAppend()
+        {
+            try
+            {
+                await multi.AppendToStreamsAsync([new StreamAppend("x", ExpectedVersion.NoStream, Events(2))]);
+                return true;
+            }
+            catch (WrongExpectedVersionException)
+            {
+                return false;
+            }
+        }
+
+        var outcomes = await Task.WhenAll(Task.Run(TryAppend), Task.Run(TryAppend));
+
+        // Different batches for the same new stream: exactly one wins, the other sees a version conflict.
+        outcomes.Count(won => won).Should().Be(1);
+        (await store.ReadAllOf("x")).Should().HaveCount(2);
+    }
 }

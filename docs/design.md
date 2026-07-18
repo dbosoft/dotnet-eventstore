@@ -323,11 +323,8 @@ public enum StoreCapabilities
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
     SnapshotHistory = 1 << 1,
 
-    /// <summary>Reserved: multi-stream atomic append; superseded by the IMultiStreamAppend interface.</summary>
-    MultiStreamAtomicAppend = 1 << 2,
-
     /// <summary>Reserved: readable/writable stream metadata; no metadata API exists yet.</summary>
-    StreamMetadata = 1 << 3,
+    StreamMetadata = 1 << 2,
 }
 ```
 
@@ -335,6 +332,14 @@ The consumer of `ExactCatchup` is the core `EventStoreSubscription`: with the fl
 and advances its checkpoint; without it, it de-duplicates by `EventId` so re-reads are idempotent — the
 "faster path vs. costlier-but-correct path" the flags exist for. `SnapshotHistory` is consumed by the
 aggregate repository's fall-back-through-older-snapshots loop.
+
+**Multi-stream atomic append** is an availability interface, not a flag: a store implements
+`IMultiStreamAppend` (one `AppendToStreamsAsync` that commits several streams all-or-nothing) iff its
+backend can. EF Core does it in one transaction and the in-memory store under its single lock;
+partition-per-stream ATS cannot, so it does not implement it. Its consumer is
+`IAggregateRepository.SaveAllAsync`, which persists several aggregates atomically and throws
+`NotSupportedByProviderException` on a store that lacks the interface rather than silently degrading to a
+non-atomic loop.
 
 The core interface, implemented by every provider:
 

@@ -18,7 +18,7 @@ internal sealed class EfCoreEventStore(
     TimeProvider timeProvider,
     bool inBandMarkers,
     TimeSpan tombstoneRetention)
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance
+    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend
 {
     public StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
 
@@ -149,6 +149,216 @@ internal sealed class EfCoreEventStore(
                 throw new WrongExpectedVersionException(streamId, expectedVersion, actual);
             }
         }
+    }
+
+    public async Task<IReadOnlyList<AppendResult>> AppendToStreamsAsync(
+        IReadOnlyList<StreamAppend> appends,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(appends);
+        if (appends.Count == 0)
+            return [];
+
+        var seenStreams = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var append in appends)
+        {
+            ArgumentException.ThrowIfNullOrEmpty(append.StreamId);
+            ArgumentNullException.ThrowIfNull(append.Events);
+            if (!seenStreams.Add(append.StreamId))
+                throw new InvalidOperationException(
+                    $"Stream '{append.StreamId}' appears more than once in a multi-stream append.");
+            var ids = new HashSet<Guid>();
+            foreach (var evt in append.Events)
+            {
+                if (!ids.Add(evt.EventId))
+                    throw new InvalidOperationException(
+                        $"The append to stream '{append.StreamId}' contains EventId {evt.EventId} more than once.");
+            }
+        }
+
+        // One context, one transaction: every stream's rows and head update commit together or not at all.
+        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        var results = new AppendResult[appends.Count];
+        var stagedLastRow = new EventRow?[appends.Count];
+        var stagedVersion = new long[appends.Count];
+        var anyStaged = false;
+
+        for (var i = 0; i < appends.Count; i++)
+        {
+            var append = appends[i];
+            var batchIds = append.Events.Select(e => e.EventId).ToHashSet();
+
+            var existing = await ctx.Events
+                .Where(e => e.Domain == domain && e.StreamId == append.StreamId && batchIds.Contains(e.EventId))
+                .Select(e => new { e.StreamVersion, e.Position })
+                .ToListAsync(ct).ConfigureAwait(false);
+
+            if (append.Events.Count > 0 && existing.Count == append.Events.Count)
+            {
+                // Already stored — idempotent replay of this entry; stage nothing for it.
+                var last = existing.MaxBy(e => e.StreamVersion)!;
+                results[i] = new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+                continue;
+            }
+
+            if (existing.Count > 0)
+                throw new InvalidOperationException(
+                    $"The append to stream '{append.StreamId}' partially overlaps events already stored; an append "
+                    + "must be either entirely new or an exact replay of a prior batch.");
+
+            var head = await ctx.Streams.FindAsync([domain, append.StreamId], ct).ConfigureAwait(false);
+            if (head is { HardDeleted: true })
+                throw new StreamDeletedException(append.StreamId);
+
+            var current = head?.Version ?? 0;
+            EnsureExpectedVersion(append.StreamId, append.ExpectedVersion, current);
+
+            if (append.Events.Count == 0)
+            {
+                results[i] = new AppendResult(current, null);
+                continue;
+            }
+
+            var version = current;
+            EventRow? lastRow = null;
+            foreach (var evt in append.Events)
+            {
+                version++;
+                lastRow = new EventRow
+                {
+                    Domain = domain,
+                    StreamId = append.StreamId,
+                    StreamVersion = version,
+                    EventId = evt.EventId,
+                    EventType = evt.EventType,
+                    Data = evt.Data.ToArray(),
+                    Metadata = evt.Metadata?.ToArray(),
+                    ContentType = evt.ContentType,
+                    CreatedAt = timeProvider.GetUtcNow()
+                };
+                ctx.Events.Add(lastRow);
+            }
+
+            if (head is null)
+                ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = append.StreamId, Version = version });
+            else
+            {
+                head.Version = version;
+                head.IsDeleted = false;
+            }
+
+            stagedLastRow[i] = lastRow;
+            stagedVersion[i] = version;
+            anyStaged = true;
+        }
+
+        if (anyStaged)
+        {
+            try
+            {
+                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                await tx.CommitAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException)
+            {
+                // A concurrent writer touched one of these streams; the whole batch rolled back. Re-read
+                // to tell an idempotent race (the same work already committed) from a genuine conflict.
+                await tx.RollbackAsync(ct).ConfigureAwait(false);
+                var reconciled = await ReconcileMultiAppendAsync(appends, ct).ConfigureAwait(false);
+                if (reconciled is null)
+                    throw; // not a version race (a transient/other DB error) — surface the real cause
+                return reconciled;
+            }
+        }
+        else
+        {
+            await tx.CommitAsync(ct).ConfigureAwait(false); // nothing written — a clean close of the empty tx
+        }
+
+        for (var i = 0; i < appends.Count; i++)
+        {
+            if (stagedLastRow[i] is { } row)
+                results[i] = new AppendResult(stagedVersion[i], GlobalPosition.FromSequence(row.Position));
+        }
+
+        return results;
+    }
+
+    // After an atomic multi-append fails at commit, re-read to classify — mirroring the single-stream
+    // path. If every entry is satisfied (each non-empty batch fully stored, each empty entry at a
+    // version that still meets its expectation) a concurrent writer committed the same work, so return
+    // that idempotent outcome. Otherwise surface a concrete per-entry cause (hard delete, partial
+    // overlap, or version conflict). Returns null when no entry explains the failure, meaning it was not
+    // a version race but a transient/other DB error the caller should see rethrown.
+    private async Task<IReadOnlyList<AppendResult>?> ReconcileMultiAppendAsync(
+        IReadOnlyList<StreamAppend> appends, CancellationToken ct)
+    {
+        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+        var actualVersions = new long[appends.Count];
+        var hardDeleted = new bool[appends.Count];
+        var storedCounts = new int[appends.Count];
+        var replays = new AppendResult?[appends.Count];
+
+        for (var i = 0; i < appends.Count; i++)
+        {
+            var append = appends[i];
+            var head = await ctx.Streams.AsNoTracking()
+                .FirstOrDefaultAsync(s => s.Domain == domain && s.StreamId == append.StreamId, ct).ConfigureAwait(false);
+            actualVersions[i] = head?.Version ?? 0;
+            hardDeleted[i] = head?.HardDeleted ?? false;
+
+            if (append.Events.Count == 0)
+                continue;
+
+            var batchIds = append.Events.Select(e => e.EventId).ToHashSet();
+            var stored = await ctx.Events.AsNoTracking()
+                .Where(e => e.Domain == domain && e.StreamId == append.StreamId && batchIds.Contains(e.EventId))
+                .Select(e => new { e.StreamVersion, e.Position })
+                .ToListAsync(ct).ConfigureAwait(false);
+            storedCounts[i] = stored.Count;
+            if (stored.Count == append.Events.Count)
+            {
+                var last = stored.MaxBy(e => e.StreamVersion)!;
+                replays[i] = new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+            }
+        }
+
+        // Whole-batch idempotent replay: everything a concurrent writer committed satisfies this call.
+        var allSatisfied = true;
+        for (var i = 0; i < appends.Count && allSatisfied; i++)
+            allSatisfied = appends[i].Events.Count == 0
+                ? IsExpectedVersionSatisfied(appends[i].ExpectedVersion, actualVersions[i])
+                : replays[i] is not null;
+
+        if (allSatisfied)
+        {
+            var results = new AppendResult[appends.Count];
+            for (var i = 0; i < appends.Count; i++)
+                results[i] = appends[i].Events.Count == 0
+                    ? new AppendResult(actualVersions[i], null)
+                    : replays[i]!;
+            return results;
+        }
+
+        // Genuine failure — surface the most specific per-entry cause, matching the pre-commit taxonomy.
+        for (var i = 0; i < appends.Count; i++)
+        {
+            var append = appends[i];
+            if (hardDeleted[i])
+                throw new StreamDeletedException(append.StreamId);
+            if (storedCounts[i] > 0 && storedCounts[i] < append.Events.Count)
+                throw new InvalidOperationException(
+                    $"The append to stream '{append.StreamId}' partially overlaps events already stored; an append "
+                    + "must be either entirely new or an exact replay of a prior batch.");
+            if (!IsExpectedVersionSatisfied(append.ExpectedVersion, actualVersions[i]))
+                throw new WrongExpectedVersionException(append.StreamId, append.ExpectedVersion, actualVersions[i]);
+        }
+
+        // No entry explains the rollback → it was not a version race. Signal the caller to rethrow.
+        return null;
     }
 
     // Whether the caller left the target version open, so a lost race can be retried rather than failed.
@@ -396,9 +606,8 @@ internal sealed class EfCoreEventStore(
             .OrderByDescending(v => v)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? 0;
 
-    private static void EnsureExpectedVersion(string streamId, long expectedVersion, long currentVersion)
-    {
-        var satisfied = expectedVersion switch
+    private static bool IsExpectedVersionSatisfied(long expectedVersion, long currentVersion) =>
+        expectedVersion switch
         {
             ExpectedVersion.Any => true,
             ExpectedVersion.NoStream => currentVersion == 0,
@@ -406,7 +615,9 @@ internal sealed class EfCoreEventStore(
             _ => expectedVersion == currentVersion
         };
 
-        if (!satisfied)
+    private static void EnsureExpectedVersion(string streamId, long expectedVersion, long currentVersion)
+    {
+        if (!IsExpectedVersionSatisfied(expectedVersion, currentVersion))
             throw new WrongExpectedVersionException(streamId, expectedVersion, currentVersion);
     }
 
