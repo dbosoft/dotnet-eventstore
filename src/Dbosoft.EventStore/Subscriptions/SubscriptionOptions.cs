@@ -2,7 +2,7 @@ namespace Dbosoft.EventStore.Subscriptions;
 
 /// <summary>Tunes an <see cref="EventStoreSubscription"/>.</summary>
 [PublicAPI]
-public sealed class SubscriptionOptions
+public sealed record SubscriptionOptions
 {
     /// <summary>Where to begin when no checkpoint has been saved yet. Defaults to the start of the log.</summary>
     public GlobalPosition StartFrom { get; init; } = GlobalPosition.Start;

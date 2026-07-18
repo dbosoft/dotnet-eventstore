@@ -179,6 +179,42 @@ public sealed class SubscriptionTests
     }
 
     [Fact]
+    public async Task StartingAt_begins_from_the_position_for_a_wall_clock_time()
+    {
+        var clock = new MutableClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var store = new InMemoryEventStore(clock);
+        var seen = new List<long>();
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1)); // recorded at t0
+        var cut = clock.Now.AddMinutes(1);
+        clock.Advance(TimeSpan.FromHours(1));
+        await store.AppendToStreamAsync("s1", 1, Events(1)); // recorded at t0 + 1h
+
+        var subscription = await EventStoreSubscription.StartingAtAsync(
+            store, new InMemoryCheckpointStore(), "sub",
+            (e, _) =>
+            {
+                seen.Add(e.StreamVersion);
+                return Task.CompletedTask;
+            },
+            cut);
+        await subscription.PumpAsync();
+
+        // Only the event recorded after the cut time is delivered.
+        seen.Should().Equal(2);
+    }
+
+    [Fact]
+    public async Task StartingAt_over_a_store_without_time_navigation_throws()
+    {
+        var store = new ScriptedStore(StoreCapabilities.None); // IAllStreamReader but not ITimeNavigable
+        var act = () => EventStoreSubscription.StartingAtAsync(
+            store, new InMemoryCheckpointStore(), "sub", (_, _) => Task.CompletedTask, DateTimeOffset.UnixEpoch);
+
+        await act.Should().ThrowAsync<NotSupportedByProviderException>();
+    }
+
+    [Fact]
     public void Constructing_over_a_store_without_all_stream_reads_throws()
     {
         var store = new NoAllReadsStore();

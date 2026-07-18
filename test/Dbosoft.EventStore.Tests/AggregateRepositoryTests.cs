@@ -9,9 +9,11 @@ namespace Dbosoft.EventStore.Tests;
 
 public sealed class AggregateRepositoryTests
 {
-    private static ServiceProvider BuildProvider(ISnapshotPolicy? policy = null)
+    private static ServiceProvider BuildProvider(ISnapshotPolicy? policy = null, TimeProvider? clock = null)
     {
         var services = new ServiceCollection();
+        if (clock is not null)
+            services.AddSingleton(clock); // wins over UseInMemory's TryAdd(TimeProvider.System)
         services.AddEventStore(b => b
             .UseInMemory()
             .AddEventType<Incremented>()
@@ -121,6 +123,86 @@ public sealed class AggregateRepositoryTests
 
         // All-or-nothing: c1's events were not written despite being valid on their own.
         (await repo.LoadAsync("c1")).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task LoadAsOf_folds_only_events_recorded_before_the_as_of_time()
+    {
+        var clock = new MutableClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        await using var sp = BuildProvider(clock: clock);
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+
+        var counter = new Counter("c1");
+        counter.Increment(3);
+        await repo.SaveAsync(counter); // event 1 at T0
+        var afterFirst = clock.Now;
+
+        clock.Advance(TimeSpan.FromHours(1));
+        var later = (await repo.LoadAsync("c1"))!;
+        later.Increment(10);
+        await repo.SaveAsync(later); // event 2 at T0 + 1h
+
+        // As of just after the first save, only the first increment has happened.
+        var past = await repo.LoadAsOfAsync("c1", afterFirst.AddMinutes(1));
+        past!.Value.Should().Be(3);
+        past.Version.Should().Be(1);
+
+        // As of now, both increments are folded in.
+        var present = await repo.LoadAsOfAsync("c1", clock.Now.AddMinutes(1));
+        present!.Value.Should().Be(13);
+        present.Version.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task LoadAsOf_returns_null_before_the_aggregate_existed()
+    {
+        var clock = new MutableClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        await using var sp = BuildProvider(clock: clock);
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+
+        var start = clock.Now;
+        var counter = new Counter("c1");
+        counter.Increment(1);
+        await repo.SaveAsync(counter);
+
+        (await repo.LoadAsOfAsync("c1", start.AddMinutes(-1))).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task LoadAsOf_excludes_an_event_recorded_exactly_at_the_as_of_instant()
+    {
+        var clock = new MutableClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        await using var sp = BuildProvider(clock: clock);
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+
+        var counter = new Counter("c1");
+        counter.Increment(5);
+        await repo.SaveAsync(counter); // recorded exactly at clock.Now
+
+        // "before" is strict: an as-of exactly at the event's timestamp excludes it; a tick later includes it.
+        (await repo.LoadAsOfAsync("c1", clock.Now)).Should().BeNull();
+        (await repo.LoadAsOfAsync("c1", clock.Now.AddTicks(1)))!.Value.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task LoadAsOf_throws_when_the_folded_prefix_crosses_a_truncation_boundary()
+    {
+        var clock = new MutableClock(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        await using var sp = BuildProvider(new EveryNEventsSnapshotPolicy(5), clock);
+        var repo = sp.GetRequiredService<IAggregateRepository<Counter>>();
+        var maintenance = (IStreamMaintenance)sp.GetRequiredService<IEventStoreProvider>()
+            .GetStore(EventStoreBuilder.DefaultDomainName);
+
+        var counter = new Counter("c1");
+        for (var i = 0; i < 6; i++)
+            counter.Increment(1);
+        await repo.SaveAsync(counter); // v1..6, snapshot at v6
+        await maintenance.TruncateStreamAsync("counter-c1", 6); // v1..5 gone
+
+        // Reconstructing the state as of now needs the truncated prefix, which an as-of view cannot bridge
+        // with a snapshot — so it fails loudly rather than fold a partial suffix.
+        var act = () => repo.LoadAsOfAsync("c1", clock.Now.AddMinutes(1));
+        await act.Should().ThrowAsync<SnapshotRequiredException>();
     }
 
     [Fact]

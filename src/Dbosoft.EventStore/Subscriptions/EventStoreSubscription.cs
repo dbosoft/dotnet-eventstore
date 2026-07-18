@@ -78,6 +78,32 @@ public sealed class EventStoreSubscription
     }
 
     /// <summary>
+    /// Creates a subscription whose first run starts at the global position for a wall-clock time,
+    /// resolved through the store's <see cref="ITimeNavigable"/> support — so a fresh consumer can replay
+    /// the global stream from a point in time. Once it has checkpointed it resumes from the checkpoint as
+    /// usual, so the start time only applies until the first pump saves progress. Requires the store to
+    /// support both <c>$all</c> reads and time navigation.
+    /// </summary>
+    /// <exception cref="NotSupportedByProviderException">The store does not support time navigation (or <c>$all</c> reads).</exception>
+    public static async Task<EventStoreSubscription> StartingAtAsync(
+        IEventStore store,
+        ICheckpointStore checkpoints,
+        string checkpointName,
+        Func<StoredEvent, CancellationToken, Task> handler,
+        DateTimeOffset from,
+        SubscriptionOptions? options = null,
+        CancellationToken ct = default)
+    {
+        if (store is not ITimeNavigable navigable)
+            throw new NotSupportedByProviderException(
+                $"The store '{store.GetType().Name}' does not support time navigation, which starting a subscription at a time requires.");
+
+        var start = await navigable.FindPositionAtAsync(from, ct).ConfigureAwait(false);
+        var effective = (options ?? new SubscriptionOptions()) with { StartFrom = start };
+        return new EventStoreSubscription(store, checkpoints, checkpointName, handler, effective);
+    }
+
+    /// <summary>
     /// Reads everything available after the saved checkpoint, dispatches it, and advances the checkpoint.
     /// Returns how many events the handler was invoked for (de-duplicated events are not counted).
     /// </summary>

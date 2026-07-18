@@ -112,6 +112,44 @@ public sealed class AggregateRepository<T> : IAggregateRepository<T> where T : A
     }
 
     /// <inheritdoc />
+    public async Task<T?> LoadAsOfAsync(string id, DateTimeOffset asOf, CancellationToken ct = default)
+    {
+        var streamId = StreamId(id);
+        var aggregate = _factory(id);
+        var exists = false;
+        var expectedVersion = 0L;
+
+        await foreach (var stored in _store
+                           .ReadStreamAsync(streamId, ct: ct)
+                           .ConfigureAwait(false))
+        {
+            // Fold the prefix recorded strictly before the as-of instant. Each event carries the time it
+            // was recorded, so the decision is per-event and involves no global ordering — correct on
+            // every provider, including one whose global positions are only per-process. Events within a
+            // stream arrive in version (and so recording) order, so the first event at or after asOf means
+            // every later one is too.
+            if (stored.CreatedAt >= asOf)
+                break;
+
+            if (SystemEventTypes.IsSystem(stored.EventType))
+                throw new InvalidOperationException(
+                    $"Stream '{streamId}' contains system event '{stored.EventType}', which cannot be folded "
+                    + $"into aggregate '{typeof(T).Name}'. Aggregate domains must not emit markers in-band.");
+
+            expectedVersion++;
+            if (stored.StreamVersion != expectedVersion)
+                // A gap before the as-of point means earlier events were truncated away; an as-of view
+                // cannot use a snapshot to bridge it, so the prefix is unrecoverable.
+                throw new SnapshotRequiredException(streamId, stored.StreamVersion);
+
+            exists = true;
+            aggregate.ReplayEvent(_materializer.Materialize(stored));
+        }
+
+        return exists ? aggregate : null;
+    }
+
+    /// <inheritdoc />
     public async Task SaveAsync(T aggregate, CancellationToken ct = default)
     {
         var events = aggregate.UncommittedEvents;

@@ -12,6 +12,18 @@ public interface IAggregateRepository<T> where T : AggregateBase
     Task<T?> LoadAsync(string id, CancellationToken ct = default);
 
     /// <summary>
+    /// Rehydrates the aggregate as it stood at <paramref name="asOf"/>, folding only the events recorded
+    /// strictly before that time — a point-in-time historical view. The decision is made per event, on the
+    /// time each event carries, so it works on any provider. Returns <c>null</c> when no surviving event
+    /// was recorded before that time (the aggregate had not been created yet, or its pre-<paramref name="asOf"/>
+    /// events have been truncated away). It folds from the start of the stream rather than a snapshot (a
+    /// snapshot carries no time), so a stream truncated within the folded prefix cannot be reconstructed
+    /// and throws.
+    /// </summary>
+    /// <exception cref="SnapshotRequiredException">The folded prefix crosses a truncation boundary.</exception>
+    Task<T?> LoadAsOfAsync(string id, DateTimeOffset asOf, CancellationToken ct = default);
+
+    /// <summary>
     /// Persists the aggregate's uncommitted events under optimistic concurrency, then writes a
     /// snapshot if the policy calls for one. Clears the uncommitted events on success.
     /// </summary>
