@@ -109,6 +109,16 @@ internal static class TableSchema
 
     public static bool IsHead(TableEntity entity) => entity.RowKey == HeadRowKey;
 
+    // --- per-stream descending index (reverse-version row key, so a range scan reads newest-first) ---
+
+    public static string IndexRowKey(long version) =>
+        (long.MaxValue - version).ToString("D19", CultureInfo.InvariantCulture);
+
+    public static TableEntity IndexEntity(string streamId, long version) =>
+        new(streamId, IndexRowKey(version)) { ["Version"] = version };
+
+    public static long IndexedVersion(TableEntity entity) => entity.GetInt64("Version") ?? 0;
+
     // --- snapshot entity (reverse-version row key, so the newest snapshot sorts first) ---
 
     public static string SnapshotRowKey(long version) =>

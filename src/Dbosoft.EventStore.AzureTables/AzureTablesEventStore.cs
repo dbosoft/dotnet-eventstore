@@ -17,6 +17,7 @@ namespace Dbosoft.EventStore.AzureTables;
 internal sealed class AzureTablesEventStore(
     TableClient eventsTable,
     TableClient snapshots,
+    TableClient indexTable,
     PayloadStore payloads,
     TimeProvider timeProvider,
     bool inBandMarkers,
@@ -173,17 +174,69 @@ internal sealed class AzureTablesEventStore(
             yield break;
         }
 
-        var upper = fromVersion <= 0 ? TableSchema.EventRowKeyUpperBound : TableSchema.EventRowKey(fromVersion);
-        var backward = $"PartitionKey eq '{Escape(streamId)}' and RowKey ge '{TableSchema.EventRowKeyLowerBound}' "
-                       + $"and RowKey le '{upper}'";
-        var page = new List<TableEntity>();
-        await foreach (var entity in eventsTable.QueryAsync<TableEntity>(backward, cancellationToken: ct).ConfigureAwait(false))
-            page.Add(entity);
+        // Backward reads use the per-stream descending index (a server-side range scan) for the body,
+        // and the events table for the not-yet-indexed tail (the newest versions, bounded by index lag).
+        // If the index is empty (no projector running), the tail is the whole stream — the plain scan.
+        var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);
+        if (head is null || TableSchema.HeadHardDeleted(head))
+            yield break;
 
-        page.Reverse();
-        foreach (var entity in page.Take(take))
-            if (await TryMaterializeAsync(entity, ct).ConfigureAwait(false) is { } stored)
+        var effectiveFrom = fromVersion <= 0
+            ? TableSchema.HeadVersion(head)
+            : Math.Min(fromVersion, TableSchema.HeadVersion(head));
+        if (effectiveFrom < 1)
+            yield break;
+
+        var indexMax = await IndexMaxVersionAsync(streamId, ct).ConfigureAwait(false);
+        var yielded = 0;
+
+        // The tail: versions above the index, newest first, straight from the events table.
+        if (effectiveFrom > indexMax)
+        {
+            var tail = new List<TableEntity>();
+            var tailFilter = $"PartitionKey eq '{Escape(streamId)}' and RowKey ge '{TableSchema.EventRowKey(indexMax + 1)}' "
+                             + $"and RowKey le '{TableSchema.EventRowKey(effectiveFrom)}'";
+            await foreach (var entity in eventsTable.QueryAsync<TableEntity>(tailFilter, cancellationToken: ct).ConfigureAwait(false))
+                tail.Add(entity);
+
+            tail.Reverse();
+            foreach (var entity in tail)
+            {
+                if (await TryMaterializeAsync(entity, ct).ConfigureAwait(false) is not { } stored)
+                    continue;
                 yield return stored;
+                if (++yielded >= take)
+                    yield break;
+            }
+        }
+
+        // The body: the index gives versions descending; dereference each to the (current) event row,
+        // skipping any a truncation has since removed.
+        var bodyFrom = Math.Min(effectiveFrom, indexMax);
+        if (bodyFrom < 1)
+            yield break;
+
+        var body = $"PartitionKey eq '{Escape(streamId)}' and RowKey ge '{TableSchema.IndexRowKey(bodyFrom)}'";
+        await foreach (var index in indexTable.QueryAsync<TableEntity>(body, cancellationToken: ct).ConfigureAwait(false))
+        {
+            var response = await eventsTable
+                .GetEntityIfExistsAsync<TableEntity>(streamId, TableSchema.EventRowKey(TableSchema.IndexedVersion(index)), cancellationToken: ct)
+                .ConfigureAwait(false);
+            if (!response.HasValue || await TryMaterializeAsync(response.Value!, ct).ConfigureAwait(false) is not { } stored)
+                continue;
+            yield return stored;
+            if (++yielded >= take)
+                yield break;
+        }
+    }
+
+    private async Task<long> IndexMaxVersionAsync(string streamId, CancellationToken ct)
+    {
+        await foreach (var index in indexTable
+                           .QueryAsync<TableEntity>($"PartitionKey eq '{Escape(streamId)}'", maxPerPage: 1, cancellationToken: ct)
+                           .ConfigureAwait(false))
+            return TableSchema.IndexedVersion(index);
+        return 0;
     }
 
     public async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
