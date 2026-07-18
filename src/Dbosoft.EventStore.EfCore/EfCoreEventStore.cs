@@ -337,6 +337,9 @@ internal sealed class EfCoreEventStore(
         bool transactional,
         CancellationToken ct)
     {
+        // Marker writes contend only with other (rarer) maintenance ops on the one $system head, so a
+        // smaller budget than the append path's suffices; retries exist to absorb that contention, not
+        // sustained load.
         const int maxAttempts = 32;
         for (var attempt = 1; ; attempt++)
         {
