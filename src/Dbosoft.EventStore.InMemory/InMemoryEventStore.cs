@@ -65,11 +65,6 @@ public sealed class InMemoryEventStore
             if (state is { HardDeleted: true })
                 throw new StreamDeletedException(streamId);
 
-            // An empty append is a no-op: report the current version and touch nothing, so it never
-            // materializes a stream or clears a soft-deletion.
-            if (events.Count == 0)
-                return Task.FromResult(new AppendResult(state?.Version ?? 0, null));
-
             var batchIds = new HashSet<Guid>();
             foreach (var evt in events)
             {
@@ -78,7 +73,7 @@ public sealed class InMemoryEventStore
                         $"The append to stream '{streamId}' contains EventId {evt.EventId} more than once.");
             }
 
-            if (state is not null)
+            if (state is not null && events.Count > 0)
             {
                 // Idempotency is scoped to the whole batch: an exact replay of an already-stored batch is
                 // a no-op, a partial overlap is an error, and a fully new batch proceeds. Dedup only holds
@@ -99,6 +94,11 @@ public sealed class InMemoryEventStore
             }
 
             EnsureExpectedVersion(streamId, expectedVersion, state?.Version ?? 0);
+
+            // An empty append writes nothing, so it never materializes a stream or clears a soft-
+            // deletion — but the expected-version check above still applies (a checked no-op).
+            if (events.Count == 0)
+                return Task.FromResult(new AppendResult(state?.Version ?? 0, null));
 
             // Validation passed — only now materialize the stream, so a rejected append leaves no trace.
             if (state is null)

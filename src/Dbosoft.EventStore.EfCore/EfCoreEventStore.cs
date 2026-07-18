@@ -47,13 +47,15 @@ internal sealed class EfCoreEventStore(
 
         if (events.Count == 0)
         {
-            // An empty append is a no-op: report the current version and touch nothing, so it never
-            // materializes a stream or clears a soft-deletion.
+            // An empty append writes nothing, so it never materializes a stream or clears a soft-
+            // deletion — but it is still a concurrency-checked no-op, honouring the expected version.
             await using var peek = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
             var peekHead = await peek.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
             if (peekHead is { HardDeleted: true })
                 throw new StreamDeletedException(streamId);
-            return new AppendResult(peekHead?.Version ?? 0, null);
+            var peekVersion = peekHead?.Version ?? 0;
+            EnsureExpectedVersion(streamId, expectedVersion, peekVersion);
+            return new AppendResult(peekVersion, null);
         }
 
         // A lost race is detected at commit as a unique-index violation and classified by re-reading.
@@ -138,7 +140,10 @@ internal sealed class EfCoreEventStore(
                     return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
                 }
 
-                var actual = await CurrentVersionAsync(streamId, ct).ConfigureAwait(false);
+                var actual = await check.Streams.AsNoTracking()
+                    .Where(s => s.Domain == domain && s.StreamId == streamId)
+                    .Select(s => (long?)s.Version)
+                    .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? 0;
                 if (stored.Count == 0 && actual == current)
                     throw; // nothing changed and the batch is absent — not a concurrency conflict
 
@@ -360,15 +365,6 @@ internal sealed class EfCoreEventStore(
             ContentType = "application/json",
             CreatedAt = timeProvider.GetUtcNow()
         });
-    }
-
-    private async Task<long> CurrentVersionAsync(string streamId, CancellationToken ct)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        return await ctx.Streams.AsNoTracking()
-            .Where(s => s.Domain == domain && s.StreamId == streamId)
-            .Select(s => (long?)s.Version)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? 0;
     }
 
     private async Task<long> LatestSnapshotVersionAsync(EventStoreDbContext ctx, string streamId, CancellationToken ct) =>

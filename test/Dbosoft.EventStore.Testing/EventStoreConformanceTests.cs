@@ -190,6 +190,40 @@ public abstract class EventStoreConformanceTests
     }
 
     [Fact]
+    public async Task Empty_append_still_honours_the_expected_version()
+    {
+        var store = CreateStore();
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+
+        // An empty append writes nothing, but it is still an optimistic-concurrency-checked no-op: a
+        // mismatched expected version is rejected, so it can gate "commit only if still at version N".
+        var mismatch = () => store.AppendToStreamAsync("s1", 1, []);
+        await mismatch.Should().ThrowAsync<WrongExpectedVersionException>();
+
+        var matched = await store.AppendToStreamAsync("s1", 3, []);
+        matched.NextExpectedVersion.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Empty_append_to_a_soft_deleted_stream_leaves_it_deleted()
+    {
+        var store = CreateStore();
+        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion))
+            return;
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
+        await maintenance.DeleteStreamAsync("s1", DeleteMode.Soft);
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.Any, []);
+
+        // The no-op must not resurrect the stream: it stays soft-deleted and reads empty.
+        var info = await store.GetStreamInfoAsync("s1");
+        info.Should().NotBeNull();
+        info.IsDeleted.Should().BeTrue();
+        (await store.ReadAllOf("s1")).Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task A_rejected_append_does_not_materialize_the_stream()
     {
         var store = CreateStore();
