@@ -36,7 +36,7 @@ public sealed class SubscriptionTests
     [Fact]
     public async Task De_duplicates_re_delivered_events_on_a_store_without_exact_catchup()
     {
-        var store = new ScriptedStore(StoreCapabilities.AllStreamReads) { Script = ScriptedEvents(3) };
+        var store = new ScriptedStore(StoreCapabilities.None) { Script = ScriptedEvents(3) };
         var count = await CountDispatchedOverTwoPumps(store);
 
         // The scripted store re-delivers the same events on the second pump; the subscription must
@@ -47,10 +47,7 @@ public sealed class SubscriptionTests
     [Fact]
     public async Task Forwards_re_delivered_events_on_an_exact_catchup_store()
     {
-        var store = new ScriptedStore(StoreCapabilities.AllStreamReads | StoreCapabilities.ExactCatchup)
-        {
-            Script = ScriptedEvents(3)
-        };
+        var store = new ScriptedStore(StoreCapabilities.ExactCatchup) { Script = ScriptedEvents(3) };
         var count = await CountDispatchedOverTwoPumps(store);
 
         // An exact-catch-up store never re-surfaces an event, so the subscription does not de-duplicate;
@@ -62,7 +59,7 @@ public sealed class SubscriptionTests
     public async Task A_handler_failure_leaves_the_checkpoint_unmoved_and_re_delivers_the_failed_event()
     {
         var events = ScriptedEvents(3);
-        var store = new ScriptedStore(StoreCapabilities.AllStreamReads) { Script = events };
+        var store = new ScriptedStore(StoreCapabilities.None) { Script = events };
         var checkpoints = new InMemoryCheckpointStore();
         var handled = new List<Guid>();
         var failOn = events[1].EventId;
@@ -91,7 +88,7 @@ public sealed class SubscriptionTests
     public async Task Evicts_the_oldest_id_once_the_de_duplication_window_is_full()
     {
         var events = ScriptedEvents(3);
-        var store = new ScriptedStore(StoreCapabilities.AllStreamReads) { Script = events };
+        var store = new ScriptedStore(StoreCapabilities.None) { Script = events };
         var handled = new List<Guid>();
         var subscription = new EventStoreSubscription(
             store, new InMemoryCheckpointStore(), "sub", (e, _) =>
@@ -174,7 +171,7 @@ public sealed class SubscriptionTests
     [Fact]
     public void A_non_positive_de_duplication_window_is_rejected()
     {
-        var store = new ScriptedStore(StoreCapabilities.AllStreamReads);
+        var store = new ScriptedStore(StoreCapabilities.None);
         var act = () => new EventStoreSubscription(store, new InMemoryCheckpointStore(), "sub",
             (_, _) => Task.CompletedTask, new SubscriptionOptions { DeduplicationWindow = 0 });
 

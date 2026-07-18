@@ -39,13 +39,7 @@ public sealed class InMemoryEventStore
 
     /// <inheritdoc />
     public StoreCapabilities Capabilities =>
-        StoreCapabilities.AllStreamReads
-        | StoreCapabilities.ExactCatchup
-        | StoreCapabilities.TimeNavigation
-        | StoreCapabilities.Truncation
-        | StoreCapabilities.StreamDeletion
-        | StoreCapabilities.SnapshotHistory
-        | StoreCapabilities.Redaction;
+        StoreCapabilities.ExactCatchup | StoreCapabilities.SnapshotHistory;
 
     /// <inheritdoc />
     public Task<AppendResult> AppendToStreamAsync(

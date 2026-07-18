@@ -74,8 +74,18 @@ conformance suite only tests what is declared. Rationale: SQL and ATS are not eq
 Reducing the API to the ATS denominator would kill projections on SQL, and pretending both are
 identical would be a lie.
 
-Symmetry is explicitly a non-goal. Each provider uses the best mechanism its storage offers, and
-the capability flags name the difference instead of hiding it.
+Symmetry is explicitly a non-goal. Each provider uses the best mechanism its storage offers, and the
+capability model names the difference instead of hiding it — along **two axes**:
+
+- **Whether an operation is *available*** is a structural fact carried by the **type system**: a
+  provider supports global reads, time navigation, truncation, deletion or redaction iff it implements
+  `IAllStreamReader`, `ITimeNavigable`, `ITruncatable`, `IStreamDeletable`, `IRedactable`. A caller
+  branches with an `is`-cast; a partially-supported operation throws `NotSupportedByProviderException`.
+  No flag restates what the type already says.
+- **How an available operation *behaves*** is what the `StoreCapabilities` flags carry — the guarantees
+  a type cannot express (is a catch-up read exact? is more than the latest snapshot kept?). A flag
+  earns its place only where a consumer branches on it: a faster path, a costlier-but-correct path, or
+  fail-fast.
 
 ### D2 — `GlobalPosition` is an opaque token, defined by the provider
 
@@ -292,7 +302,8 @@ public sealed record StoredEvent(
     DateTimeOffset CreatedAt);
 ```
 
-Capabilities. Each flag states a guarantee a caller can rely on, which is why they carry doc
+Capabilities are **behavioural guarantees only** — availability lives in the interfaces (D1), so the
+flag set is small. Each flag states a guarantee a consumer branches on, which is why they carry doc
 comments — the name alone does not say what you get:
 
 ```csharp
@@ -301,36 +312,29 @@ public enum StoreCapabilities
 {
     None = 0,
 
-    /// <summary>Events across all streams can be read in a single ordered sequence.</summary>
-    AllStreamReads = 1 << 0,
-
     /// <summary>
-    /// A catch-up read of that sequence is complete: reading forward from a position never silently
+    /// A catch-up read of the global sequence is exact: reading forward from a position never silently
     /// skips an event that commits below the point already returned. Without this flag a catch-up is
-    /// complete only up to a bounded staleness window, so the reader must re-read and de-dupe by
+    /// complete only up to a bounded staleness window, so a subscription must re-read and de-dupe by
     /// EventId. (There is no subscription capability — delivery is the bus's job, D3.)
     /// </summary>
-    ExactCatchup = 1 << 2,
-
-    /// <summary>Events for several streams can be appended in one atomic operation.</summary>
-    MultiStreamAtomicAppend = 1 << 3,
-
-    /// <summary>A position can be located from a wall-clock timestamp.</summary>
-    TimeNavigation = 1 << 4,
-
-    /// <summary>Streams carry readable and writable metadata.</summary>
-    StreamMetadata = 1 << 5,
-
-    /// <summary>Events below a version can be permanently removed from a stream.</summary>
-    Truncation = 1 << 6,
-
-    /// <summary>Whole streams can be deleted.</summary>
-    StreamDeletion = 1 << 7,
+    ExactCatchup = 1 << 0,
 
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
-    SnapshotHistory = 1 << 8,
+    SnapshotHistory = 1 << 1,
+
+    /// <summary>Reserved: multi-stream atomic append; superseded by the IMultiStreamAppend interface.</summary>
+    MultiStreamAtomicAppend = 1 << 2,
+
+    /// <summary>Reserved: readable/writable stream metadata; no metadata API exists yet.</summary>
+    StreamMetadata = 1 << 3,
 }
 ```
+
+The consumer of `ExactCatchup` is the core `EventStoreSubscription`: with the flag it forwards each event
+and advances its checkpoint; without it, it de-duplicates by `EventId` so re-reads are idempotent — the
+"faster path vs. costlier-but-correct path" the flags exist for. `SnapshotHistory` is consumed by the
+aggregate repository's fall-back-through-older-snapshots loop.
 
 The core interface, implemented by every provider:
 
@@ -391,12 +395,14 @@ public interface ISnapshotStore
     Task PruneAsync(string streamId, int keep, ...);
 }
 
-public interface IStreamMaintenance
-{
-    Task TruncateStreamAsync(string streamId, long beforeVersion, bool force = false, ...);
-    Task DeleteStreamAsync(string streamId, DeleteMode mode, ...);
-    Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, ...);
-}
+// Destructive operations are split into role interfaces, so a provider advertises exactly what it
+// supports by which it implements; IStreamMaintenance is the composite of all four.
+public interface ITruncatable    { Task TruncateStreamAsync(string streamId, long beforeVersion, bool force = false, ...); }
+public interface IStreamDeletable { Task DeleteStreamAsync(string streamId, DeleteMode mode, ...); }
+public interface IRedactable      { Task RedactEventAsync(string streamId, long version, ReadOnlyMemory<byte> newData, ...); }
+public interface IScavengeable    { Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, ...); }
+
+public interface IStreamMaintenance : ITruncatable, IStreamDeletable, IRedactable, IScavengeable;
 ```
 
 A catch-up reader supplies whatever knob the provider needs to bound its watermark (gap timeout on
@@ -414,7 +420,7 @@ last one is missing in SAPId and is what retry logic needs.
   `Data` (varbinary), `Metadata`, `ContentType`, `CreatedAt`.
   Unique `(StreamId, StreamVersion)`, unique `(StreamId, EventId)` for idempotency.
   **No composite time index** — `$all` rides the PK (D2). An index on `CreatedAt` is created *only*
-  when `TimeNavigation` is enabled.
+  when time navigation is enabled for the domain.
 - `Snapshots` — PK `(StreamId, StreamVersion)`.
 
 **Append without a pre-read race:** no `MaxAsync`. Two race-free schemes, composable:
@@ -439,8 +445,8 @@ caller-owned transaction is the future unit-of-work context (D6), not part of th
 **`$all`:** `WHERE Domain = @d AND Position > @p ORDER BY Position`. Because domains are an indexed
 discriminator over one `es_events` table with one shared identity column, a single domain's positions
 are **not dense** — the gaps are other domains' events. Gap-detection-based `ExactCatchup` therefore
-does not apply to this layout: EF Core declares `AllStreamReads | TimeNavigation | Truncation |
-StreamDeletion | SnapshotHistory | Redaction`, but **not** `ExactCatchup`. Catch-up reads are still
+does not apply to this layout: EF Core implements the global-read, time-navigation and maintenance
+interfaces and declares `SnapshotHistory`, but **not** `ExactCatchup`. Catch-up reads are still
 ordered and complete; a consumer needing exactness de-duplicates by `EventId` (a future per-domain
 sequence or table-per-domain layout would restore density).
 
@@ -501,9 +507,10 @@ scan and `$all` is empty until it does — always correct, never blocking a writ
 | Queue / Event Hubs as the ordering channel | Pulls in an external service dependency we explicitly do not want, and only solves the *live* case — a historical `ReadAllAsync(from: T)` still needs the table index, so you end up with both. |
 | No `$all` on ATS at all | The honest fallback: per-stream reads only. Costs cross-stream read models on ATS entirely. Kept in reserve if the index proves unworkable. |
 
-⇒ ATS declares `AllStreamReads | TimeNavigation | Truncation | StreamDeletion | SnapshotHistory |
-Redaction`, but **not** `MultiStreamAtomicAppend` and **not** `ExactCatchup` (the monotonic position is
-per-process, so a catch-up subscription de-duplicates by `EventId`).
+⇒ ATS implements the global-read, time-navigation and maintenance interfaces (truncation, deletion,
+redaction) and declares `SnapshotHistory`, but does **not** support multi-stream atomic append and does
+**not** declare `ExactCatchup` (the monotonic position is per-process, so a catch-up subscription
+de-duplicates by `EventId`).
 
 **Large payloads → blobs.** Each domain has a blob container. A payload field small enough stays inline
 in the entity; a field over the inline limit is written to a blob and the entity keeps a reference, so
@@ -560,8 +567,8 @@ the queryable attribute home, and selective retention is a non-folded-domain cap
 Simple prefix/count retention (`MaxCount`, keep-last-N) remains available for the shape-preserving
 case; the attribute+time search is the general form above.
 
-**Redaction — the GDPR-erasure mechanism, and it *is* in scope** (`RedactEventAsync`, capability
-`Redaction`, emits `$event-redacted`). Erasing a subject's PII is **not** deleting a stream; it is
+**Redaction — the GDPR-erasure mechanism, and it *is* in scope** (`IRedactable.RedactEventAsync`,
+emits `$event-redacted`). Erasing a subject's PII is **not** deleting a stream; it is
 **overwriting the personal fields of the affected events in place**. Contrary to an earlier read,
 this *preserves* the shape: the event's version, position and id are unchanged — only its
 `Data`/`Metadata` bytes change, so there is no hole. That is exactly why it is the right erasure tool
@@ -594,9 +601,9 @@ is a possible later refinement; the time-based window is the first cut.
 ## 8. Testing — the heart of the agnosticism
 
 `Dbosoft.EventStore.Testing` as a **public** package: an abstract `EventStoreConformanceTests`
-suite that each provider inherits via a fixture. Capability-gated — a provider that does not
-declare `Truncation` skips those tests instead of faking them. Public so that third-party providers
-can validate their implementation too.
+suite that each provider inherits via a fixture. Capability-gated — a provider that does not implement
+`ITruncatable` (or does not declare a behavioural flag) skips those tests instead of faking them.
+Public so that third-party providers can validate their implementation too.
 
 Stack: **xunit**, **AwesomeAssertions**, **NSubstitute**.
 

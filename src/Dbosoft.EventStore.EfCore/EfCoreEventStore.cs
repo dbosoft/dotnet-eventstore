@@ -20,13 +20,7 @@ internal sealed class EfCoreEventStore(
     TimeSpan tombstoneRetention)
     : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance
 {
-    public StoreCapabilities Capabilities =>
-        StoreCapabilities.AllStreamReads
-        | StoreCapabilities.TimeNavigation
-        | StoreCapabilities.Truncation
-        | StoreCapabilities.StreamDeletion
-        | StoreCapabilities.SnapshotHistory
-        | StoreCapabilities.Redaction;
+    public StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
 
     public async Task<AppendResult> AppendToStreamAsync(
         string streamId,

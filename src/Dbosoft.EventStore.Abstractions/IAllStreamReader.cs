@@ -1,8 +1,8 @@
 namespace Dbosoft.EventStore;
 
 /// <summary>
-/// Reads events across all streams in global order. Optional; gated by
-/// <see cref="StoreCapabilities.AllStreamReads"/>.
+/// Reads events across all streams in global order. Optional — a provider supports global reads iff it
+/// implements this interface.
 /// </summary>
 [PublicAPI]
 public interface IAllStreamReader

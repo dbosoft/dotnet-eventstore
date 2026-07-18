@@ -224,7 +224,7 @@ public abstract class EventStoreConformanceTests
     public async Task Empty_append_to_a_soft_deleted_stream_leaves_it_deleted()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion))
+        if (store is not IStreamDeletable maintenance)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
@@ -311,7 +311,7 @@ public abstract class EventStoreConformanceTests
     public async Task All_stream_read_returns_events_across_streams_in_order()
     {
         var store = CreateStore();
-        if (store is not IAllStreamReader reader || !store.Capabilities.HasFlag(StoreCapabilities.AllStreamReads))
+        if (store is not IAllStreamReader reader)
             return;
 
         await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(2));
@@ -329,7 +329,7 @@ public abstract class EventStoreConformanceTests
     public async Task All_stream_read_from_position_is_exclusive()
     {
         var store = CreateStore();
-        if (store is not IAllStreamReader reader || !store.Capabilities.HasFlag(StoreCapabilities.AllStreamReads))
+        if (store is not IAllStreamReader reader)
             return;
 
         await store.AppendToStreamAsync("a", ExpectedVersion.NoStream, Events(3));
@@ -417,7 +417,7 @@ public abstract class EventStoreConformanceTests
     public async Task Time_navigation_finds_position_at_timestamp()
     {
         var store = CreateStore();
-        if (store is not ITimeNavigable navigable || !store.Capabilities.HasFlag(StoreCapabilities.TimeNavigation))
+        if (store is not ITimeNavigable navigable)
             return;
         if (store is not IAllStreamReader reader)
             return;
@@ -436,7 +436,7 @@ public abstract class EventStoreConformanceTests
     public async Task Truncation_without_snapshot_is_refused_but_forced_succeeds()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.Truncation))
+        if (store is not ITruncatable maintenance)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
@@ -457,7 +457,7 @@ public abstract class EventStoreConformanceTests
     public async Task Truncation_beyond_the_head_is_clamped_to_the_end()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.Truncation))
+        if (store is not ITruncatable maintenance)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(5));
@@ -477,7 +477,7 @@ public abstract class EventStoreConformanceTests
     public async Task Truncation_is_allowed_with_a_covering_snapshot()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.Truncation))
+        if (store is not ITruncatable maintenance)
             return;
         var snapshots = GetSnapshotStore(store);
         if (snapshots is null)
@@ -495,8 +495,7 @@ public abstract class EventStoreConformanceTests
     public async Task Truncation_emits_a_marker_into_the_global_stream()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
-            || !store.Capabilities.HasFlag(StoreCapabilities.Truncation))
+        if (store is not ITruncatable maintenance || store is not IAllStreamReader reader)
             return;
         var snapshots = GetSnapshotStore(store);
         if (snapshots is null)
@@ -517,8 +516,7 @@ public abstract class EventStoreConformanceTests
     public async Task Redaction_overwrites_the_payload_in_place_and_emits_a_marker()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
-            || !store.Capabilities.HasFlag(StoreCapabilities.Redaction))
+        if (store is not IRedactable maintenance || store is not IAllStreamReader reader)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, [Event("Registered", "{\"pii\":\"secret\"}")]);
@@ -540,7 +538,7 @@ public abstract class EventStoreConformanceTests
     public async Task Soft_delete_removes_events_and_allows_recreation()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion))
+        if (store is not IStreamDeletable maintenance)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
@@ -556,7 +554,7 @@ public abstract class EventStoreConformanceTests
     public async Task Hard_delete_burns_the_stream_id()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion))
+        if (store is not IStreamDeletable maintenance)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
@@ -570,7 +568,7 @@ public abstract class EventStoreConformanceTests
     public async Task Soft_delete_then_recreate_continues_the_version_sequence()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion))
+        if (store is not IStreamDeletable maintenance)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
@@ -590,9 +588,7 @@ public abstract class EventStoreConformanceTests
     public async Task Repeated_soft_delete_is_idempotent_and_emits_one_marker()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
-            || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion)
-            || !store.Capabilities.HasFlag(StoreCapabilities.AllStreamReads))
+        if (store is not IStreamDeletable maintenance || store is not IAllStreamReader reader)
             return;
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(3));
@@ -609,9 +605,7 @@ public abstract class EventStoreConformanceTests
     public async Task Concurrent_maintenance_on_distinct_streams_emits_every_marker_without_raw_errors()
     {
         var store = CreateStore();
-        if (store is not IStreamMaintenance maintenance || store is not IAllStreamReader reader
-            || !store.Capabilities.HasFlag(StoreCapabilities.StreamDeletion)
-            || !store.Capabilities.HasFlag(StoreCapabilities.AllStreamReads))
+        if (store is not IStreamDeletable maintenance || store is not IAllStreamReader reader)
             return;
 
         const int streams = 8;

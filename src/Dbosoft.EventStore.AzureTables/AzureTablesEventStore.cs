@@ -32,13 +32,7 @@ internal sealed class AzureTablesEventStore(
     private readonly Lock _tickGate = new();
     private long _lastTick;
 
-    public StoreCapabilities Capabilities =>
-        StoreCapabilities.AllStreamReads
-        | StoreCapabilities.TimeNavigation
-        | StoreCapabilities.Truncation
-        | StoreCapabilities.StreamDeletion
-        | StoreCapabilities.SnapshotHistory
-        | StoreCapabilities.Redaction;
+    public StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
 
     public async Task<AppendResult> AppendToStreamAsync(
         string streamId,

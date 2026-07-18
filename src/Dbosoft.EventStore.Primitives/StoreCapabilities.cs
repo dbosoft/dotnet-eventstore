@@ -1,52 +1,37 @@
 namespace Dbosoft.EventStore;
 
 /// <summary>
-/// The optional features a provider supports beyond the core append/read contract. A caller reads
-/// the store's declared capabilities and only uses an optional interface that appears among them;
-/// the conformance suite tests only what is declared.
+/// Behavioural guarantees a provider makes about operations it already offers — the answers the type
+/// system cannot give. Whether an <i>operation</i> is available is a structural fact (the store
+/// implements the matching interface: <c>IAllStreamReader</c>, <c>ITimeNavigable</c>, <c>ITruncatable</c>,
+/// and so on); these flags describe how an available operation <i>behaves</i>, so a consumer can pick a
+/// faster path, a costlier-but-correct path, or fail fast. The conformance suite gates its behavioural
+/// assertions on them.
 /// </summary>
 [Flags]
 [PublicAPI]
 public enum StoreCapabilities
 {
-    /// <summary>The core append/read contract only; no optional features.</summary>
+    /// <summary>No behavioural guarantees beyond the core contract.</summary>
     None = 0,
 
     /// <summary>
-    /// Events across all streams in a domain can be read in a single ordered sequence — the basis
-    /// for replay, read-model rebuilds and forwarding to a message bus.
+    /// A catch-up read of the global sequence is exact: reading forward from a position never silently
+    /// skips an event that will commit below the point already returned. Without this flag a catch-up
+    /// read is complete only up to a bounded staleness window, so a subscription must tolerate re-reading
+    /// and de-duplicate by <see cref="StoredEvent.EventId"/>.
     /// </summary>
-    AllStreamReads = 1 << 0,
-
-    /// <summary>
-    /// A catch-up read over that sequence is exact: reading forward from a position never silently
-    /// skips an event that will commit below the point already returned. Without this flag a
-    /// catch-up read is complete only up to a bounded staleness window, so readers must tolerate
-    /// re-reading and de-duplicate by <see cref="StoredEvent.EventId"/>.
-    /// </summary>
-    ExactCatchup = 1 << 2,
-
-    /// <summary>
-    /// Reserved: events for several streams appended in one atomic operation. No append API for this
-    /// exists yet, so no provider declares it; the flag is kept for when a multi-stream append is added.
-    /// </summary>
-    MultiStreamAtomicAppend = 1 << 3,
-
-    /// <summary>A position can be located from a wall-clock timestamp.</summary>
-    TimeNavigation = 1 << 4,
-
-    /// <summary>Streams carry readable and writable metadata.</summary>
-    StreamMetadata = 1 << 5,
-
-    /// <summary>Events before a version can be permanently removed from a stream.</summary>
-    Truncation = 1 << 6,
-
-    /// <summary>Whole streams can be deleted.</summary>
-    StreamDeletion = 1 << 7,
+    ExactCatchup = 1 << 0,
 
     /// <summary>More than the latest snapshot per stream is retained and readable.</summary>
-    SnapshotHistory = 1 << 8,
+    SnapshotHistory = 1 << 1,
 
-    /// <summary>A single event's payload can be overwritten in place (PII erasure / redaction).</summary>
-    Redaction = 1 << 9
+    /// <summary>
+    /// Reserved: events for several streams appended in one atomic operation. Superseded by the
+    /// <c>IMultiStreamAppend</c> interface — kept until every provider is migrated off the flag.
+    /// </summary>
+    MultiStreamAtomicAppend = 1 << 2,
+
+    /// <summary>Reserved: streams carry readable and writable metadata. No metadata API exists yet.</summary>
+    StreamMetadata = 1 << 3
 }
