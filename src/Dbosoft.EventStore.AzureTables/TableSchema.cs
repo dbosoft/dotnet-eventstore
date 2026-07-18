@@ -28,8 +28,11 @@ internal static class TableSchema
 
     // --- blob names for spilled payloads (one container per domain) ---
 
-    public static string DataBlobName(string streamId, long version) => $"e/{streamId}/{version}/d";
-    public static string MetaBlobName(string streamId, long version) => $"e/{streamId}/{version}/m";
+    // Event payload blobs are keyed by the event's own id, not its version: an id is unique and stable
+    // across append retries, so two writers racing for the same version never collide on a blob name
+    // (which would corrupt the winner's data), and a retried append reuses its blob rather than leaking.
+    public static string DataBlobName(string streamId, Guid eventId) => $"e/{streamId}/{eventId:N}/d";
+    public static string MetaBlobName(string streamId, Guid eventId) => $"e/{streamId}/{eventId:N}/m";
     public static string SnapshotBlobName(string streamId, long version) => $"s/{streamId}/{version}";
 
     // --- head entity ---
@@ -98,7 +101,7 @@ internal static class TableSchema
             Required(entity, "ContentType"),
             entity.GetDateTimeOffset("CreatedAt") ?? default);
 
-    private static Guid EventId(TableEntity entity) => Guid.ParseExact(Required(entity, "EventId"), "N");
+    public static Guid EventId(TableEntity entity) => Guid.ParseExact(Required(entity, "EventId"), "N");
 
     public static long Version(TableEntity entity) => entity.GetInt64("StreamVersion") ?? 0;
 

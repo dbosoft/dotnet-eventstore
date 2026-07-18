@@ -69,6 +69,28 @@ public sealed class AzureTablesFaultInjectionTests(AzuriteContainerFixture conta
     }
 
     [Fact]
+    public async Task A_failed_blob_cleanup_during_truncation_recovers_on_retry()
+    {
+        var (provider, domain, _, blobPolicy) = Build(container.ConnectionString);
+        await provider.EnsureCreatedAsync();
+        var store = provider.GetStore(domain);
+        var maintenance = (IStreamMaintenance)store;
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, [new EventData(Guid.NewGuid(), "Big", RandomBytes(200_000))]);
+        await store.AppendToStreamAsync("s1", 1, Events(4));
+
+        // Truncation deletes the payload blobs before the rows; fail that delete.
+        blobPolicy.ShouldFail = req => req.Method == RequestMethod.Delete;
+        var act = () => maintenance.TruncateStreamAsync("s1", 3, force: true);
+        await act.Should().ThrowAsync<RequestFailedException>();
+
+        // Nothing was committed (the boundary was not advanced), so a retry completes it cleanly — no
+        // orphaned blob, no partial state.
+        blobPolicy.ShouldFail = null;
+        await maintenance.TruncateStreamAsync("s1", 3, force: true);
+        (await store.ReadAllOf("s1")).Select(e => e.StreamVersion).Should().Equal(3, 4, 5);
+    }
+
+    [Fact]
     public async Task A_vanished_payload_blob_is_skipped_rather_than_crashing_the_read()
     {
         var (provider, domain, _, blobPolicy) = Build(container.ConnectionString);

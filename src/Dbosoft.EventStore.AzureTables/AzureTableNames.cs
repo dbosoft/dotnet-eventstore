@@ -12,22 +12,27 @@ namespace Dbosoft.EventStore.AzureTables;
 /// </summary>
 internal static class AzureTableNames
 {
-    public static string Events(string prefix, string domain) => prefix + Token(domain) + "Events";
+    public static string Events(string prefix, string domain) => Compose(prefix, domain, "Events");
 
-    public static string Snapshots(string prefix, string domain) => prefix + Token(domain) + "Snapshots";
+    public static string Snapshots(string prefix, string domain) => Compose(prefix, domain, "Snapshots");
 
     public static string Checkpoints(string prefix) => (prefix.Length == 0 ? "Es" : prefix) + "Checkpoints";
 
     // The blob container holding large payloads for a domain. Container names are lowercase; the token
     // is already alphanumeric, so lower-casing keeps it valid.
     public static string Container(string prefix, string domain) =>
-        (prefix + Token(domain) + "payloads").ToLowerInvariant();
+        Compose(prefix, domain, "payloads").ToLowerInvariant();
 
-    private static string Token(string domain) =>
-        IsTableSafe(domain) ? domain : "d" + Hash(domain);
+    // Uses the domain verbatim when it is alphanumeric and the whole name fits Azure's 63-char limit,
+    // otherwise a stable short hash — so any domain, of any length, yields a valid name.
+    private static string Compose(string prefix, string domain, string suffix)
+    {
+        var readable = prefix + domain + suffix;
+        return IsTableSafe(domain) && readable.Length <= 63 ? readable : prefix + "d" + Hash(domain) + suffix;
+    }
 
     private static bool IsTableSafe(string domain) =>
-        domain.Length is >= 1 and <= 40 && char.IsAsciiLetter(domain[0]) && domain.All(char.IsAsciiLetterOrDigit);
+        domain.Length >= 1 && char.IsAsciiLetter(domain[0]) && domain.All(char.IsAsciiLetterOrDigit);
 
     private static string Hash(string domain) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(domain)))[..16];

@@ -46,6 +46,7 @@ internal sealed class AzureTablesEventStore(
     {
         ArgumentException.ThrowIfNullOrEmpty(streamId);
         ArgumentNullException.ThrowIfNull(events);
+        EnsureValidStreamId(streamId);
         if (events.Count > MaxEventsPerAppend)
             throw new NotSupportedByProviderException(
                 $"Azure Table Storage appends are limited to {MaxEventsPerAppend} events per batch (the "
@@ -94,8 +95,9 @@ internal sealed class AzureTablesEventStore(
             for (var i = 0; i < events.Count; i++)
             {
                 version++;
-                var data = await payloads.PutAsync(TableSchema.DataBlobName(streamId, version), events[i].Data, ct).ConfigureAwait(false);
-                var metadata = await payloads.PutAsync(TableSchema.MetaBlobName(streamId, version), events[i].Metadata, ct).ConfigureAwait(false);
+                var eventId = events[i].EventId;
+                var data = await payloads.PutAsync(TableSchema.DataBlobName(streamId, eventId), events[i].Data, ct).ConfigureAwait(false);
+                var metadata = await payloads.PutAsync(TableSchema.MetaBlobName(streamId, eventId), events[i].Metadata, ct).ConfigureAwait(false);
                 var entity = TableSchema.EventEntity(streamId, version, positions[i], events[i], createdAt, data, metadata);
                 actions.Add(new TableTransactionAction(TableTransactionActionType.Add, entity));
             }
@@ -280,14 +282,18 @@ internal sealed class AzureTablesEventStore(
                 await foreach (var entity in eventsTable.QueryAsync<TableEntity>(below, cancellationToken: ct).ConfigureAwait(false))
                     removed.Add(entity);
 
+                // Delete the payload blobs before the rows: if this fails the boundary is not yet
+                // advanced, so a retry re-queries the (still present) rows and re-deletes idempotently —
+                // nothing is orphaned. Blob deletes commit no state, so the reverse order would strand
+                // them if the row delete later failed.
+                await DeletePayloadBlobsAsync(removed, ct).ConfigureAwait(false);
+
                 var actions = removed.Select(e => new TableTransactionAction(TableTransactionActionType.Delete, e, e.ETag)).ToList();
                 head["TruncatedBefore"] = boundary;
                 actions.Add(new TableTransactionAction(TableTransactionActionType.UpdateReplace, head, head.ETag));
 
                 if (!await TrySubmitAsync(actions, attempt, ct).ConfigureAwait(false))
                     continue;
-
-                await DeletePayloadBlobsAsync(removed, ct).ConfigureAwait(false);
             }
 
             // Emit the marker (in a different partition, so not atomic with the data) and only then
@@ -322,6 +328,11 @@ internal sealed class AzureTablesEventStore(
                 await foreach (var entity in eventsTable.QueryAsync<TableEntity>(all, cancellationToken: ct).ConfigureAwait(false))
                     removed.Add(entity);
 
+                // Delete blobs and snapshots before flipping the head to deleted, so a failure here is
+                // recovered by a retry (the rows are still present and re-queried) rather than orphaned.
+                await DeletePayloadBlobsAsync(removed, ct).ConfigureAwait(false);
+                await DeleteAllSnapshotsAsync(streamId, ct).ConfigureAwait(false);
+
                 var actions = removed.Select(e => new TableTransactionAction(TableTransactionActionType.Delete, e, e.ETag)).ToList();
                 head["IsDeleted"] = true;
                 head["TruncatedBefore"] = TableSchema.HeadVersion(head) + 1;
@@ -332,9 +343,6 @@ internal sealed class AzureTablesEventStore(
 
                 if (!await TrySubmitAsync(actions, attempt, ct).ConfigureAwait(false))
                     continue;
-
-                await DeletePayloadBlobsAsync(removed, ct).ConfigureAwait(false);
-                await DeleteAllSnapshotsAsync(streamId, ct).ConfigureAwait(false);
             }
 
             await EmitMarkerAsync(
@@ -361,11 +369,12 @@ internal sealed class AzureTablesEventStore(
                 throw new StreamNotFoundException(streamId);
 
             var entity = response.Value!;
+            var eventId = TableSchema.EventId(entity);
             var priorData = TableSchema.ReadSlot(entity, "Data");
             var priorMeta = TableSchema.ReadSlot(entity, "Meta");
 
-            var data = await payloads.PutAsync(TableSchema.DataBlobName(streamId, version), newData, ct).ConfigureAwait(false);
-            var metadata = await payloads.PutAsync(TableSchema.MetaBlobName(streamId, version), newMetadata, ct).ConfigureAwait(false);
+            var data = await payloads.PutAsync(TableSchema.DataBlobName(streamId, eventId), newData, ct).ConfigureAwait(false);
+            var metadata = await payloads.PutAsync(TableSchema.MetaBlobName(streamId, eventId), newMetadata, ct).ConfigureAwait(false);
             TableSchema.WriteSlot(entity, "Data", data);
             TableSchema.WriteSlot(entity, "Meta", metadata);
 
@@ -394,23 +403,39 @@ internal sealed class AzureTablesEventStore(
     public async Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
     {
         var cutoff = timeProvider.GetUtcNow() - tombstoneRetention;
-        var expired = new List<TableEntity>();
         var systemFilter = $"PartitionKey eq '{Escape(TableSchema.SystemStream)}' and RowKey ge '{TableSchema.EventRowKeyLowerBound}' "
                            + $"and RowKey le '{TableSchema.EventRowKeyUpperBound}'";
-        await foreach (var entity in eventsTable.QueryAsync<TableEntity>(systemFilter, cancellationToken: ct).ConfigureAwait(false))
-        {
-            if (entity.GetDateTimeOffset("CreatedAt") is { } createdAt && createdAt < cutoff)
-                expired.Add(entity);
-        }
 
-        foreach (var chunk in expired.Chunk(100))
+        var removed = -1;
+        for (var attempt = 1; ; attempt++)
         {
-            await eventsTable.SubmitTransactionAsync(
-                    chunk.Select(e => new TableTransactionAction(TableTransactionActionType.Delete, e, e.ETag)), ct)
-                .ConfigureAwait(false);
-        }
+            var expired = new List<TableEntity>();
+            await foreach (var entity in eventsTable.QueryAsync<TableEntity>(systemFilter, cancellationToken: ct).ConfigureAwait(false))
+            {
+                if (entity.GetDateTimeOffset("CreatedAt") is { } createdAt && createdAt < cutoff)
+                    expired.Add(entity);
+            }
 
-        await DeletePayloadBlobsAsync(expired, ct).ConfigureAwait(false);
+            if (removed < 0)
+                removed = expired.Count;
+            if (expired.Count == 0)
+                break;
+
+            try
+            {
+                foreach (var chunk in expired.Chunk(100))
+                    await eventsTable.SubmitTransactionAsync(
+                            chunk.Select(e => new TableTransactionAction(TableTransactionActionType.Delete, e, e.ETag)), ct)
+                        .ConfigureAwait(false);
+            }
+            catch (RequestFailedException) when (attempt < 8)
+            {
+                continue; // a concurrent scavenge or append changed the tombstones; re-query and retry
+            }
+
+            await DeletePayloadBlobsAsync(expired, ct).ConfigureAwait(false);
+            break;
+        }
 
         var streams = 0;
         await foreach (var _ in eventsTable
@@ -418,7 +443,7 @@ internal sealed class AzureTablesEventStore(
                            .ConfigureAwait(false))
             streams++;
 
-        return new ScavengeReport(streams, expired.Count);
+        return new ScavengeReport(streams, Math.Max(0, removed));
     }
 
     // Resolves an event's payloads (downloading blobs for spilled fields). Returns null when a
@@ -510,11 +535,19 @@ internal sealed class AzureTablesEventStore(
 
     private async Task<List<TableEntity>> FindByEventIdsAsync(string streamId, HashSet<Guid> batchIds, CancellationToken ct)
     {
-        var ids = string.Join(" or ", batchIds.Select(id => $"EventId eq '{id:N}'"));
-        var filter = $"PartitionKey eq '{Escape(streamId)}' and ({ids})";
+        // Query the batch's ids in small groups: a single filter with dozens of "or" predicates can hit
+        // the service's filter/URL limits (Azurite is more permissive, so it would pass tests but fail
+        // against real storage). Ten per query keeps every request comfortably within bounds.
+        const int perQuery = 10;
         var found = new List<TableEntity>();
-        await foreach (var entity in eventsTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
-            found.Add(entity);
+        foreach (var group in batchIds.Chunk(perQuery))
+        {
+            var ids = string.Join(" or ", group.Select(id => $"EventId eq '{id:N}'"));
+            var filter = $"PartitionKey eq '{Escape(streamId)}' and ({ids})";
+            await foreach (var entity in eventsTable.QueryAsync<TableEntity>(filter, cancellationToken: ct).ConfigureAwait(false))
+                found.Add(entity);
+        }
+
         return found;
     }
 
@@ -602,4 +635,18 @@ internal sealed class AzureTablesEventStore(
     private static int Clamp(long maxCount) => maxCount >= int.MaxValue ? int.MaxValue : (int)Math.Max(0, maxCount);
 
     private static string Escape(string value) => value.Replace("'", "''");
+
+    // Azure Table Storage forbids '/', '\\', '#', '?' and control characters in a partition key (the
+    // stream id). Reject them with a clear, provider-specific error instead of an opaque storage failure
+    // — the relational and in-memory providers accept any id, so this is a documented ATS constraint.
+    private static void EnsureValidStreamId(string streamId)
+    {
+        foreach (var c in streamId)
+        {
+            if (c is '/' or '\\' or '#' or '?' || char.IsControl(c))
+                throw new NotSupportedByProviderException(
+                    $"Azure Table Storage cannot use '{streamId}' as a stream id: the characters '/', '\\', "
+                    + "'#', '?' and control characters are not allowed in a partition key.");
+        }
+    }
 }
