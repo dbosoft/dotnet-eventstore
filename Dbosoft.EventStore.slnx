@@ -5,13 +5,17 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Dbosoft.EventStore.Abstractions/Dbosoft.EventStore.Abstractions.csproj" />
+    <Project Path="src/Dbosoft.EventStore.EfCore.PostgreSql/Dbosoft.EventStore.EfCore.PostgreSql.csproj" />
     <Project Path="src/Dbosoft.EventStore.EfCore.Sqlite/Dbosoft.EventStore.EfCore.Sqlite.csproj" />
+    <Project Path="src/Dbosoft.EventStore.EfCore.SqlServer/Dbosoft.EventStore.EfCore.SqlServer.csproj" />
     <Project Path="src/Dbosoft.EventStore.EfCore/Dbosoft.EventStore.EfCore.csproj" />
     <Project Path="src/Dbosoft.EventStore.InMemory/Dbosoft.EventStore.InMemory.csproj" />
     <Project Path="src/Dbosoft.EventStore.Primitives/Dbosoft.EventStore.Primitives.csproj" />
     <Project Path="src/Dbosoft.EventStore/Dbosoft.EventStore.csproj" />
   </Folder>
   <Folder Name="/test/">
+    <Project Path="test/Dbosoft.EventStore.EfCore.PostgreSql.Tests/Dbosoft.EventStore.EfCore.PostgreSql.Tests.csproj" />
+    <Project Path="test/Dbosoft.EventStore.EfCore.SqlServer.Tests/Dbosoft.EventStore.EfCore.SqlServer.Tests.csproj" />
     <Project Path="test/Dbosoft.EventStore.EfCore.Tests/Dbosoft.EventStore.EfCore.Tests.csproj" />
     <Project Path="test/Dbosoft.EventStore.Testing/Dbosoft.EventStore.Testing.csproj" />
     <Project Path="test/Dbosoft.EventStore.Tests/Dbosoft.EventStore.Tests.csproj" />
