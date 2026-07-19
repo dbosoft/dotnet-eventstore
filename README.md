@@ -128,6 +128,12 @@ and be rebuilt from zero by replaying `$all` from the start.
 [`samples/Dbosoft.EventStore.Sample.Projection`](samples/Dbosoft.EventStore.Sample.Projection) is a runnable
 walkthrough: a subscription-fed account statement, a live resume from its checkpoint, and a rebuild.
 
+By default `RunAsync` polls (`PollInterval`). To wake it on a write instead — **without a message bus** —
+register a change notifier: `es.UseInProcessNotifications()` for a writer and reader in the same process,
+then pass it via `SubscriptionOptions.ChangeNotifier` + `NotifyKey`. It is a best-effort "something changed"
+ping (no content, no ordering) with polling as the backstop, so any transport works — in-process, or a thin
+bridge over a bus / Redis / Postgres `LISTEN/NOTIFY` you plug in as an `IChangeNotifier`.
+
 ### A message bus?
 
 The store is deliberately bus-agnostic. Ordered projections read the store's catch-up above — a message bus

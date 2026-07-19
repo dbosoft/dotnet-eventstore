@@ -169,7 +169,29 @@ public sealed class EventStoreSubscription
         {
             var dispatched = await PumpAsync(ct).ConfigureAwait(false);
             if (dispatched == 0)
-                await Task.Delay(_options.PollInterval, _options.TimeProvider, ct).ConfigureAwait(false);
+                await WaitForWorkAsync(ct).ConfigureAwait(false);
+        }
+    }
+
+    // After an empty pump, wait for a change signal if one is configured (waking on a write), bounded by the
+    // poll interval as a backstop; otherwise just poll. A missed signal is caught by the poll tick.
+    private async Task WaitForWorkAsync(CancellationToken ct)
+    {
+        if (_options is { ChangeNotifier: { } notifier, NotifyKey: { } key })
+        {
+            try
+            {
+                await notifier.WaitForChangeAsync(key, ct)
+                    .WaitAsync(_options.PollInterval, _options.TimeProvider, ct).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                // The poll tick elapsed with no signal — pump anyway.
+            }
+        }
+        else
+        {
+            await Task.Delay(_options.PollInterval, _options.TimeProvider, ct).ConfigureAwait(false);
         }
     }
 

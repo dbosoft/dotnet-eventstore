@@ -20,18 +20,36 @@ public sealed class InMemoryEventStore
     private readonly TimeProvider _timeProvider;
     private readonly bool _inBandMarkers;
     private readonly TimeSpan _tombstoneRetention;
+    private readonly IChangeNotifier? _changeNotifier;
+    private readonly string _notifyDomain;
     private long _sequence;
 
-    /// <summary>Creates the store, optionally with a custom time source and marker policy.</summary>
+    /// <summary>Creates the store, optionally with a custom time source, marker policy and change notifier.</summary>
     public InMemoryEventStore(
         TimeProvider? timeProvider = null,
         bool inBandMarkers = false,
-        TimeSpan? tombstoneRetention = null)
+        TimeSpan? tombstoneRetention = null,
+        IChangeNotifier? changeNotifier = null,
+        string? notifyDomain = null)
     {
         _timeProvider = timeProvider ?? TimeProvider.System;
         _inBandMarkers = inBandMarkers;
         _tombstoneRetention = tombstoneRetention ?? TimeSpan.FromDays(7);
+        _changeNotifier = changeNotifier;
+        _notifyDomain = notifyDomain ?? "";
         Snapshots = new InMemorySnapshotStore(this);
+    }
+
+    // Best-effort "something changed" signal after a write, so a subscription can wake without polling.
+    // The in-process notifier completes inline; anything slower is fire-and-forget (a lost signal is caught
+    // by the subscription's poll backstop).
+    private void FireChanged()
+    {
+        if (_changeNotifier is null)
+            return;
+        var pending = _changeNotifier.NotifyAsync(_notifyDomain);
+        if (!pending.IsCompleted)
+            _ = pending.AsTask();
     }
 
     /// <summary>A snapshot store backed by the same in-memory data.</summary>
@@ -121,6 +139,7 @@ public sealed class InMemoryEventStore
                 _all.Add(entry);
             }
 
+            FireChanged();
             return Task.FromResult(new AppendResult(state.Version, LastPosition(state)));
         }
     }
@@ -220,6 +239,7 @@ public sealed class InMemoryEventStore
                 results[i] = new AppendResult(state.Version, LastPosition(state));
             }
 
+            FireChanged();
             return Task.FromResult<IReadOnlyList<AppendResult>>(results);
         }
     }

@@ -659,6 +659,11 @@ nothing more:
   message into an append. This is the one pipeline read models and the bridge share; it is no longer
   locked inside the aggregate repository.
 - **`ICheckpointStore`** — a relay or a read-model rebuild remembers how far it read.
+- **`IChangeNotifier`** (optional) — a best-effort "something changed" ping so a subscription wakes on a
+  write instead of waiting out its poll interval, **without a bus**. It carries no content and no ordering,
+  and polling is the backstop, so a lost ping only costs latency — which is exactly why any transport works
+  (in-process by default; a cross-process bridge over a bus/Redis/Postgres `LISTEN/NOTIFY` is one pluggable
+  impl). A provider signals it on write; the store stays the source of truth.
 
 Two positions the design names and leaves to the application:
 

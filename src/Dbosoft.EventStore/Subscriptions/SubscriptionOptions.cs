@@ -19,6 +19,17 @@ public sealed record SubscriptionOptions
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
+    /// Optional change signal so <see cref="EventStoreSubscription.RunAsync"/> wakes on a write instead of
+    /// waiting out <see cref="PollInterval"/>. When set together with <see cref="NotifyKey"/>, an empty pump
+    /// waits for the signal <i>or</i> the poll interval, whichever comes first — so the poll stays the
+    /// backstop. Best-effort: a missed signal only costs latency.
+    /// </summary>
+    public IChangeNotifier? ChangeNotifier { get; init; }
+
+    /// <summary>The domain (or key) to wait on via <see cref="ChangeNotifier"/>; required for it to take effect.</summary>
+    public string? NotifyKey { get; init; }
+
+    /// <summary>
     /// On a store <b>without</b> <see cref="StoreCapabilities.ExactCatchup"/>, the subscription does not
     /// deliver (or checkpoint past) an event recorded more recently than this — an event whose position was
     /// assigned but whose commit may not yet be visible could have a lower-positioned sibling still in
