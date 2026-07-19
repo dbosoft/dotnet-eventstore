@@ -17,22 +17,25 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
     private readonly TableServiceClient _tables;
     private readonly BlobServiceClient _blobs;
     private readonly TimeProvider _timeProvider;
+    private readonly IChangeNotifier? _changeNotifier;
     private readonly string _prefix;
     private readonly Dictionary<string, DomainOptions> _options;
     private readonly ConcurrentDictionary<string, AzureTablesEventStore> _stores = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AzureTablesSnapshotStore> _snapshotStores = new(StringComparer.Ordinal);
 
-    /// <summary>Creates the provider for the registered domains.</summary>
+    /// <summary>Creates the provider for the registered domains, optionally signalling changes to subscriptions.</summary>
     public AzureTablesEventStoreProvider(
         TableServiceClient tables,
         BlobServiceClient blobs,
         IEnumerable<RegisteredDomain> domains,
         TimeProvider timeProvider,
-        string tablePrefix)
+        string tablePrefix,
+        IChangeNotifier? changeNotifier = null)
     {
         _tables = tables;
         _blobs = blobs;
         _timeProvider = timeProvider;
+        _changeNotifier = changeNotifier;
         _prefix = tablePrefix;
         _options = domains
             .GroupBy(d => d.Name, StringComparer.Ordinal)
@@ -54,7 +57,7 @@ public sealed class AzureTablesEventStoreProvider : IEventStoreProvider
             var options = OptionsFor(key);
             return new AzureTablesEventStore(
                 EventsTable(key), SnapshotsTable(key), IndexTable(key), AllIndexTable(key), Payloads(key),
-                _timeProvider, options.InBandMarkers, options.TombstoneRetention);
+                _timeProvider, options.InBandMarkers, options.TombstoneRetention, key, _changeNotifier);
         });
 
     /// <summary>The default safety window: the projector holds events newer than this before indexing them,

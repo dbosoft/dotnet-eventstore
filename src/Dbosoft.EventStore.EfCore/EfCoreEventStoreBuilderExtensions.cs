@@ -1,5 +1,6 @@
 using Dbosoft.EventStore.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Dbosoft.EventStore.EfCore;
@@ -28,7 +29,11 @@ public static class EfCoreEventStoreBuilderExtensions
         builder.Services.TryAddSingleton<IDbContextFactory<EventStoreDbContext>>(
             new EventStoreDbContextFactory(optionsBuilder.Options, configureModel));
         builder.Services.TryAddSingleton(TimeProvider.System);
-        builder.Services.TryAddSingleton<IEventStoreProvider, EfCoreEventStoreProvider>();
+        builder.Services.TryAddSingleton<IEventStoreProvider>(sp => new EfCoreEventStoreProvider(
+            sp.GetRequiredService<IDbContextFactory<EventStoreDbContext>>(),
+            sp.GetServices<RegisteredDomain>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<IChangeNotifier>())); // optional — only wired when notifications are registered
         builder.Services.TryAddSingleton<ICheckpointStore, EfCoreCheckpointStore>();
         return builder;
     }

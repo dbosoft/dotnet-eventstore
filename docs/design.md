@@ -670,7 +670,10 @@ nothing more:
   write instead of waiting out its poll interval, **without a bus**. It carries no content and no ordering,
   and polling is the backstop, so a lost ping only costs latency — which is exactly why any transport works
   (in-process by default; a cross-process bridge over a bus/Redis/Postgres `LISTEN/NOTIFY` is one pluggable
-  impl). A provider signals it on write; the store stays the source of truth.
+  impl). The signal is wired **once in the core**: `EventStoreBase` fires it on the append path as a
+  template method, so every provider signals uniformly by deriving from it rather than each re-implementing
+  the plumbing; a provider calls the same protected hook after any further write it exposes (a multi-stream
+  append, a maintenance marker). The store stays the source of truth.
 
 Two positions the design names and leaves to the application:
 

@@ -28,7 +28,8 @@ public static class AzureTablesEventStoreBuilderExtensions
 
         builder.Services.TryAddSingleton(TimeProvider.System);
         builder.Services.TryAddSingleton(sp => new AzureTablesEventStoreProvider(
-            tables, blobs, sp.GetServices<RegisteredDomain>(), sp.GetRequiredService<TimeProvider>(), prefix));
+            tables, blobs, sp.GetServices<RegisteredDomain>(), sp.GetRequiredService<TimeProvider>(), prefix,
+            sp.GetService<IChangeNotifier>())); // optional — only wired when notifications are registered
         builder.Services.TryAddSingleton<IEventStoreProvider>(sp => sp.GetRequiredService<AzureTablesEventStoreProvider>());
         builder.Services.TryAddSingleton(sp => sp.GetRequiredService<AzureTablesEventStoreProvider>().Checkpoints);
         return builder;

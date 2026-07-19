@@ -11,7 +11,7 @@ namespace Dbosoft.EventStore.InMemory;
 /// </summary>
 [PublicAPI]
 public sealed class InMemoryEventStore
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
+    : EventStoreBase, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, StreamState> _streams = new(StringComparer.Ordinal);
@@ -20,8 +20,6 @@ public sealed class InMemoryEventStore
     private readonly TimeProvider _timeProvider;
     private readonly bool _inBandMarkers;
     private readonly TimeSpan _tombstoneRetention;
-    private readonly IChangeNotifier? _changeNotifier;
-    private readonly string _notifyDomain;
     private long _sequence;
 
     /// <summary>Creates the store, optionally with a custom time source, marker policy and change notifier.</summary>
@@ -31,40 +29,31 @@ public sealed class InMemoryEventStore
         TimeSpan? tombstoneRetention = null,
         IChangeNotifier? changeNotifier = null,
         string? notifyDomain = null)
+        : base(changeNotifier)
     {
         _timeProvider = timeProvider ?? TimeProvider.System;
         _inBandMarkers = inBandMarkers;
         _tombstoneRetention = tombstoneRetention ?? TimeSpan.FromDays(7);
-        _changeNotifier = changeNotifier;
-        _notifyDomain = notifyDomain ?? "";
+        NotifyDomain = notifyDomain ?? "";
         Snapshots = new InMemorySnapshotStore(this);
     }
 
-    // Best-effort "something changed" signal after a write, so a subscription can wake without polling.
-    // The in-process notifier completes inline; anything slower is fire-and-forget (a lost signal is caught
-    // by the subscription's poll backstop).
-    private void FireChanged()
-    {
-        if (_changeNotifier is null)
-            return;
-        var pending = _changeNotifier.NotifyAsync(_notifyDomain);
-        if (!pending.IsCompleted)
-            _ = pending.AsTask();
-    }
+    /// <inheritdoc />
+    protected override string NotifyDomain { get; }
 
     /// <summary>A snapshot store backed by the same in-memory data.</summary>
     public ISnapshotStore Snapshots { get; }
 
     /// <inheritdoc />
-    public StoreCapabilities Capabilities =>
+    public override StoreCapabilities Capabilities =>
         StoreCapabilities.ExactCatchup | StoreCapabilities.SnapshotHistory;
 
     /// <inheritdoc />
-    public Task<AppendResult> AppendToStreamAsync(
+    protected override Task<AppendResult> AppendToStreamCoreAsync(
         string streamId,
         long expectedVersion,
         IReadOnlyList<EventData> events,
-        CancellationToken ct = default)
+        CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(streamId);
         ArgumentNullException.ThrowIfNull(events);
@@ -139,7 +128,7 @@ public sealed class InMemoryEventStore
                 _all.Add(entry);
             }
 
-            FireChanged();
+            // The base fires the change signal once this returns (see EventStoreBase.AppendToStreamAsync).
             return Task.FromResult(new AppendResult(state.Version, LastPosition(state)));
         }
     }
@@ -152,6 +141,7 @@ public sealed class InMemoryEventStore
         ArgumentNullException.ThrowIfNull(appends);
         ct.ThrowIfCancellationRequested();
 
+        AppendResult[] results;
         lock (_gate)
         {
             var seenStreams = new HashSet<string>(StringComparer.Ordinal);
@@ -208,7 +198,7 @@ public sealed class InMemoryEventStore
             }
 
             // Phase 2 — apply. Validation passed, so nothing here can fail.
-            var results = new AppendResult[appends.Count];
+            results = new AppendResult[appends.Count];
             for (var i = 0; i < plan.Length; i++)
             {
                 var (append, state, settled) = plan[i];
@@ -238,14 +228,16 @@ public sealed class InMemoryEventStore
 
                 results[i] = new AppendResult(state.Version, LastPosition(state));
             }
-
-            FireChanged();
-            return Task.FromResult<IReadOnlyList<AppendResult>>(results);
         }
+
+        // A multi-stream append is a write path beyond the core append, so signal it explicitly — after
+        // the gate, so a slow custom notifier never runs under the lock.
+        NotifyChanged();
+        return Task.FromResult<IReadOnlyList<AppendResult>>(results);
     }
 
     /// <inheritdoc />
-    public async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
+    public override async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
         string streamId,
         ReadDirection direction = ReadDirection.Forwards,
         long fromVersion = 0,
@@ -277,7 +269,7 @@ public sealed class InMemoryEventStore
     }
 
     /// <inheritdoc />
-    public Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
+    public override Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         lock (_gate)
@@ -400,8 +392,12 @@ public sealed class InMemoryEventStore
             state.TruncatedBefore = beforeVersion;
 
             EmitMarker(SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion), streamId);
-            return Task.CompletedTask;
         }
+
+        // The marker advanced $all, so signal it — after the gate, so a slow custom notifier never runs
+        // under the lock. The no-op path above returns inside the gate and never reaches here.
+        NotifyChanged();
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -431,8 +427,12 @@ public sealed class InMemoryEventStore
 
             // Whole-stream deletion always goes to $system — the stream is gone.
             EmitMarker(SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null);
-            return Task.CompletedTask;
         }
+
+        // The tombstone advanced $all, so signal it — after the gate. The already-deleted no-op path above
+        // returns inside the gate and never reaches here.
+        NotifyChanged();
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -461,8 +461,11 @@ public sealed class InMemoryEventStore
                 _all[allIndex] = redacted;
 
             EmitMarker(SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId);
-            return Task.CompletedTask;
         }
+
+        // The redaction marker advanced $all, so signal it — after the gate.
+        NotifyChanged();
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />

@@ -22,8 +22,11 @@ internal sealed class AzureTablesEventStore(
     PayloadStore payloads,
     TimeProvider timeProvider,
     bool inBandMarkers,
-    TimeSpan tombstoneRetention)
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IStreamMetadataStore
+    TimeSpan tombstoneRetention,
+    string domain,
+    IChangeNotifier? changeNotifier = null)
+    : EventStoreBase(changeNotifier),
+        IAllStreamReader, ITimeNavigable, IStreamMaintenance, IStreamMetadataStore
 {
     // A single entity-group transaction holds at most 100 entities; one is the HEAD, so at most 99
     // events per append.
@@ -32,13 +35,15 @@ internal sealed class AzureTablesEventStore(
     private readonly Lock _tickGate = new();
     private long _lastTick;
 
-    public StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
+    protected override string NotifyDomain => domain;
 
-    public async Task<AppendResult> AppendToStreamAsync(
+    public override StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
+
+    protected override async Task<AppendResult> AppendToStreamCoreAsync(
         string streamId,
         long expectedVersion,
         IReadOnlyList<EventData> events,
-        CancellationToken ct = default)
+        CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(streamId);
         ArgumentNullException.ThrowIfNull(events);
@@ -140,7 +145,7 @@ internal sealed class AzureTablesEventStore(
         }
     }
 
-    public async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
+    public override async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
         string streamId,
         ReadDirection direction = ReadDirection.Forwards,
         long fromVersion = 0,
@@ -235,7 +240,7 @@ internal sealed class AzureTablesEventStore(
         return 0;
     }
 
-    public async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
+    public override async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
     {
         EnsureValidStreamId(streamId);
         var head = await TryGetHeadAsync(streamId, ct).ConfigureAwait(false);

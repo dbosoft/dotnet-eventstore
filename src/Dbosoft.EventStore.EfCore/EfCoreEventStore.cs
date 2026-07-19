@@ -17,16 +17,20 @@ internal sealed class EfCoreEventStore(
     string domain,
     TimeProvider timeProvider,
     bool inBandMarkers,
-    TimeSpan tombstoneRetention)
-    : IEventStore, IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
+    TimeSpan tombstoneRetention,
+    IChangeNotifier? changeNotifier = null)
+    : EventStoreBase(changeNotifier),
+        IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
 {
-    public StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
+    protected override string NotifyDomain => domain;
 
-    public async Task<AppendResult> AppendToStreamAsync(
+    public override StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
+
+    protected override async Task<AppendResult> AppendToStreamCoreAsync(
         string streamId,
         long expectedVersion,
         IReadOnlyList<EventData> events,
-        CancellationToken ct = default)
+        CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(streamId);
         ArgumentNullException.ThrowIfNull(events);
@@ -285,6 +289,10 @@ internal sealed class EfCoreEventStore(
                 results[i] = new AppendResult(stagedVersion[i], GlobalPosition.FromSequence(row.Position));
         }
 
+        // A multi-stream append is a write path beyond the core append, so signal it explicitly — only when
+        // it actually wrote (a pure idempotent replay returned above, having changed nothing).
+        if (anyStaged)
+            NotifyChanged();
         return results;
     }
 
@@ -375,7 +383,7 @@ internal sealed class EfCoreEventStore(
         expectedVersion == ExpectedVersion.Any
         || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);
 
-    public async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
+    public override async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
         string streamId,
         ReadDirection direction = ReadDirection.Forwards,
         long fromVersion = 0,
@@ -397,7 +405,7 @@ internal sealed class EfCoreEventStore(
             yield return ToStored(row);
     }
 
-    public async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
+    public override async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
     {
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         var head = await ctx.Streams.AsNoTracking()
@@ -670,6 +678,10 @@ internal sealed class EfCoreEventStore(
                 await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 if (tx is not null)
                     await tx.CommitAsync(ct).ConfigureAwait(false);
+
+                // The maintenance op emitted a marker into $all, so signal it — a no-op returned above
+                // (operation() == false) without reaching here.
+                NotifyChanged();
                 return;
             }
             catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException && attempt < maxAttempts)
