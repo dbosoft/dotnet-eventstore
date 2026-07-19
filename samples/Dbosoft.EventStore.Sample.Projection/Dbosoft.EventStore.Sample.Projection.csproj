@@ -2,15 +2,13 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <RootNamespace>Dbosoft.EventStore.Sample.RebusReadModel</RootNamespace>
+    <RootNamespace>Dbosoft.EventStore.Sample.Projection</RootNamespace>
     <IsPackable>false</IsPackable>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Dbosoft.EventStore.InMemory\Dbosoft.EventStore.InMemory.csproj" />
-    <ProjectReference Include="..\..\src\Dbosoft.EventStore.Rebus\Dbosoft.EventStore.Rebus.csproj" />
-    <PackageReference Include="Rebus" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
   </ItemGroup>
 

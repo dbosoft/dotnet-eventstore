@@ -123,39 +123,19 @@ var subscription = new EventStoreSubscription(
 await subscription.RunAsync(cancellationToken); // pumps and checkpoints until cancelled
 ```
 
-### Forward to a message bus (Rebus)
+A read model is a pure fold of that ordered stream, so it can keep whatever it needs — including history —
+and be rebuilt from zero by replaying `$all` from the start.
+[`samples/Dbosoft.EventStore.Sample.Projection`](samples/Dbosoft.EventStore.Sample.Projection) is a runnable
+walkthrough: a subscription-fed account statement, a live resume from its checkpoint, and a rebuild.
 
-`Dbosoft.EventStore.Rebus` relays a domain's `$all` onto [Rebus](https://github.com/rebus-org/Rebus), so
-subscribers consume events as ordinary Rebus messages. Register it next to your Rebus setup:
+### A message bus?
 
-```csharp
-services.AddRebusEventRelay("tracking"); // forwards the "tracking" domain's $all onto the registered IBus
-```
-
-Each message carries the event's stream id, version, global position and id in its headers.
-
-> **Rebus does not guarantee message order, and delivers at-least-once.** With competing consumers,
-> retries and redelivery, handlers see events out of order and more than once — never rely on arrival order.
-
-The store solves this: treat each bus message as a *signal* ("stream S has an event at version V") and let
-the store — which *is* ordered — supply the content. `OrderedEventDispatcher` does exactly that: it applies
-each stream in ascending version order, exactly once, filling gaps by reading the store, no matter how the
-signals are ordered or duplicated.
-
-```csharp
-// A Rebus handler: the bus is only the signal, the store is the authority for order.
-if (EventStoreMetadata.TryRead(MessageContext.Current.Headers, out var meta))
-    await dispatcher.DispatchAsync(meta); // in-order, exactly-once, gap-filling per-stream application
-```
-
-This needs the consumer to have store access (which is why the store, not the bus, orders). A consumer
-that only has the bus must configure Rebus for ordered delivery (single worker, no concurrent handlers) or
-accept best-effort — the lower-level `StreamOrderingTracker` classifies each message as next / duplicate /
-gap if you want to handle it yourself.
-
-A runnable end-to-end walkthrough — direct-off-the-bus feed, store-authoritative read model, scrambled/
-duplicated delivery, and a rebuild — is in
-[`samples/Dbosoft.EventStore.Sample.RebusReadModel`](samples/Dbosoft.EventStore.Sample.RebusReadModel).
+The store is deliberately bus-agnostic. Ordered projections read the store's catch-up above — a message bus
+(Rebus, NServiceBus, MassTransit) does **not** preserve order and delivers at-least-once, so it is the wrong
+source for a folded read model. Use a bus for what it is good at — commands and integration events between
+services — and wire it in your app: an outbox is the same `EventStoreSubscription` with your own
+`bus.Publish(...)` for the events you choose to expose; an inbound handler is `materializer.Dematerialize(...)`
+then `AppendToStreamAsync(...)`. The library ships no bus adapter on purpose.
 
 ## More
 

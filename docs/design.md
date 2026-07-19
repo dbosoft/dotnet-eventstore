@@ -669,21 +669,16 @@ Two positions the design names and leaves to the application:
   forwards every new event to the bus. No dual-write; live and replay use one path.
 
 The **inbound** side is not a special primitive — a bus handler uses the normal append API, with the
-materializer mapping the message to an event. The bus adapter itself is a **separate optional
-package**; a **demo in-memory bus** ships as the reference adapter (as InMemory is the reference
-provider — proves the seam, no external dependency), and `Dbosoft.EventStore.Rebus` is the real one.
+materializer mapping the message to an event.
 
-`RebusEventRelay` is the outbox: it tails `$all` from a checkpoint and publishes each materialized event
-onto Rebus with the stream id, version, position and event id in the message headers. The order caveat is
-explicit and unavoidable: **Rebus delivers unordered and at-least-once**, so the relay publishes in order
-but consumers cannot rely on receiving in order. The resolution is *not* to make the bus ordered — it is
-to treat each message as a **signal** and read the ordered content from the store: `OrderedEventDispatcher`
-applies each stream in ascending version order, exactly once, filling a gap (a later event arriving first)
-by reading the store, whatever order the signals arrive in. The bus is a low-latency notification; the
-store stays the authority for order and never yields it. This needs the consumer to have store access; a
-consumer with only the bus must use an ordered Rebus transport or accept best-effort (the lower-level
-`StreamOrderingTracker` classifies each message so it can). `StoreToBusRelay` (in the InMemory package) is
-the same shape without the Rebus dependency, so the seam is exercised end to end with no external broker.
+**The library ships no bus adapter, on purpose.** A message bus (Rebus, NServiceBus, MassTransit) does not
+preserve order and delivers at-least-once, so it is the wrong source for a folded read model — ordered
+projections read the store's catch-up (as EventStoreDB, Marten and Axon do; the store is the ordered log).
+The bus is for what it is good at, commands and integration events between services, and *which* events are
+exposed and in what shape is application policy the store cannot decide. So the app wires its own bus: an
+outbox is an `EventStoreSubscription` plus the app's `bus.Publish(...)` for its chosen events; an inbound
+handler is `materializer.Dematerialize(...)` then `AppendToStreamAsync(...)`. `StoreToBusRelay` (in the
+InMemory package) is a reference of the outbox shape without any real-bus dependency, for tests and samples.
 
 ## 9. Package layout
 
@@ -706,7 +701,7 @@ ships no DI sugar could reference Abstractions alone.
 | `Dbosoft.EventStore.AzureTables` | ATS provider | Core, Azure.Data.Tables |
 | `Dbosoft.EventStore.InMemory` | reference / test implementation | Core |
 | `Dbosoft.EventStore.Testing` | conformance suite | Abstractions, xunit, AwesomeAssertions |
-| `Dbosoft.EventStore.Rebus` | Rebus adapter (relay, headers, ordering tracker) | Core, Rebus |
+| _(no bus package)_ | the bus is the app's concern; the store stays bus-agnostic (§8a) | — |
 
 ## 10. Phased plan
 

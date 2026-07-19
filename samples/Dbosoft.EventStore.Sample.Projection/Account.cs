@@ -1,6 +1,6 @@
 using Dbosoft.EventStore.Aggregates;
 
-namespace Dbosoft.EventStore.Sample.RebusReadModel;
+namespace Dbosoft.EventStore.Sample.Projection;
 
 /// <summary>Marker for every event in the banking domain — registered in one call with AddEventTypesImplementing.</summary>
 public interface IAccountEvent;
@@ -11,7 +11,7 @@ public sealed record MoneyDeposited(decimal Amount) : IAccountEvent;
 
 public sealed record MoneyWithdrawn(decimal Amount) : IAccountEvent;
 
-/// <summary>A tiny account aggregate: it raises events and folds them into a balance. It never touches the store.</summary>
+/// <summary>A tiny account aggregate: it raises delta events and folds them into a balance. It never touches the store.</summary>
 public sealed class Account(string id) : AggregateBase(id)
 {
     /// <summary>Stream-id prefix (category) for account streams — a stream id is "account-{id}".</summary>
