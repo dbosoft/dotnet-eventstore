@@ -673,7 +673,9 @@ nothing more:
   impl). The signal is wired **once in the core**: `EventStoreBase` fires it on the append path as a
   template method, so every provider signals uniformly by deriving from it rather than each re-implementing
   the plumbing; a provider calls the same protected hook after any further write it exposes (a multi-stream
-  append, a maintenance marker). The store stays the source of truth.
+  append, a maintenance marker). The store stays the source of truth. `Dbosoft.EventStore.Rebus` ships one
+  cross-process bridge: `NotifyAsync` publishes an `EventStoreChanged` ping and a handler releases the
+  receiving process's local waiters — a wake signal over the bus, deliberately not event delivery on it.
 
 Two positions the design names and leaves to the application:
 

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dbosoft.EventStore.Rebus</RootNamespace>
+    <Description>Cross-process change-notification bridge for the Dbosoft event store over Rebus: a best-effort wake signal so an out-of-process subscription catches up on a write. Not a bus adapter — the store stays bus-agnostic.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Dbosoft.EventStore\Dbosoft.EventStore.csproj" />
+    <PackageReference Include="Rebus" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+  </ItemGroup>
+
+</Project>

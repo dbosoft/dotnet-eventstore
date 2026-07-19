@@ -136,7 +136,10 @@ By default `RunAsync` polls (`PollInterval`). To wake it on a write instead — 
 register a change notifier: `es.UseInProcessNotifications()` for a writer and reader in the same process,
 then pass it via `SubscriptionOptions.ChangeNotifier` + `NotifyKey`. It is a best-effort "something changed"
 ping (no content, no ordering) with polling as the backstop, so any transport works — in-process, or a thin
-bridge over a bus / Redis / Postgres `LISTEN/NOTIFY` you plug in as an `IChangeNotifier`.
+bridge over a bus / Redis / Postgres `LISTEN/NOTIFY` you plug in as an `IChangeNotifier`. Every provider
+fires the ping on write through the shared store base, so it works the same on any store. For a cross-process
+reader, [`Dbosoft.EventStore.Rebus`](src/Dbosoft.EventStore.Rebus) ships one such bridge over Rebus
+(`es.UseRebusNotifications()`) — still just a wake signal, not event delivery.
 
 ### A message bus?
 
@@ -145,7 +148,9 @@ The store is deliberately bus-agnostic. Ordered projections read the store's cat
 source for a folded read model. Use a bus for what it is good at — commands and integration events between
 services — and wire it in your app: an outbox is the same `EventStoreSubscription` with your own
 `bus.Publish(...)` for the events you choose to expose; an inbound handler is `materializer.Dematerialize(...)`
-then `AppendToStreamAsync(...)`. The library ships no bus adapter on purpose.
+then `AppendToStreamAsync(...)`. The library ships no bus adapter on purpose. (The one Rebus package it does
+ship, `Dbosoft.EventStore.Rebus`, is a cross-process *change-notification* bridge — a best-effort wake ping,
+above — not event delivery.)
 
 ## More
 
