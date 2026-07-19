@@ -11,7 +11,8 @@ public static class ServiceCollectionExtensions
     /// <summary>
     /// Registers the serializer and returns a builder for choosing a provider, declaring domains and
     /// their event types, and adding aggregate repositories. Each declared domain is also exposed as a
-    /// keyed <see cref="IEventStore"/> (keyed by domain name) for direct injection.
+    /// keyed <see cref="IEventStore"/> (keyed by domain name) for direct injection, and — for a
+    /// read-model or relay component that must not write — as a keyed read-only <see cref="IAllStreamReader"/>.
     /// </summary>
     public static EventStoreBuilder AddEventStore(this IServiceCollection services, Action<EventStoreBuilder> configure)
     {
@@ -32,6 +33,15 @@ public static class ServiceCollectionExtensions
             services.AddSingleton(new RegisteredDomain(domain.Name, domain.Options));
             services.AddKeyedSingleton<IEventStore>(domain.Name, (sp, key) =>
                 sp.GetRequiredService<IEventStoreProvider>().GetStore((string)key!));
+
+            // A read-only $all surface, keyed by domain, so a projection or relay component can be wired
+            // with just a reader (plus the keyed IEventMaterializer and the ICheckpointStore) and is
+            // structurally unable to write — the DI separation a process split relies on. It shares the
+            // keyed IEventStore singleton; resolving it against a provider without $all support throws.
+            services.AddKeyedSingleton<IAllStreamReader>(domain.Name, (sp, key) =>
+                sp.GetRequiredKeyedService<IEventStore>(key) as IAllStreamReader
+                ?? throw new NotSupportedByProviderException(
+                    $"The store for domain '{key}' does not support $all reads, which a read-only reader requires."));
         }
 
         return builder;

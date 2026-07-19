@@ -128,6 +128,10 @@ and be rebuilt from zero by replaying `$all` from the start.
 [`samples/Dbosoft.EventStore.Sample.Projection`](samples/Dbosoft.EventStore.Sample.Projection) is a runnable
 walkthrough: a subscription-fed account statement, a live resume from its checkpoint, and a rebuild.
 
+A projection component can be wired **read-only**: each domain is also a keyed `IAllStreamReader`, so it
+injects a reader (plus the keyed `IEventMaterializer` and the `ICheckpointStore`) and is structurally unable
+to write. Build the subscription over it with `EventStoreSubscription.ForReader(reader, checkpoints, name, handler)`.
+
 By default `RunAsync` polls (`PollInterval`). To wake it on a write instead — **without a message bus** —
 register a change notifier: `es.UseInProcessNotifications()` for a writer and reader in the same process,
 then pass it via `SubscriptionOptions.ChangeNotifier` + `NotifyKey`. It is a best-effort "something changed"

@@ -4,11 +4,32 @@ using Dbosoft.EventStore.InMemory;
 using Dbosoft.EventStore.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
+using static Dbosoft.EventStore.Testing.ConformanceHelpers;
 
 namespace Dbosoft.EventStore.Tests;
 
 public sealed class MaterializerAndCheckpointTests
 {
+    [Fact]
+    public async Task A_read_only_reader_is_keyed_per_domain_and_reads_the_all_stream()
+    {
+        var services = new ServiceCollection();
+        services.AddEventStore(es => es.UseInMemory().AddDomain("d", d => d.AddEventType<Incremented>()));
+        await using var sp = services.BuildServiceProvider();
+
+        var store = sp.GetRequiredKeyedService<IEventStore>("d");
+        await store.AppendToStreamAsync("counter-1", ExpectedVersion.NoStream, Events(1));
+
+        // A projection component would inject only this reader — it can catch up without a write handle.
+        var reader = sp.GetRequiredKeyedService<IAllStreamReader>("d");
+        var count = 0;
+        await foreach (var _ in reader.ReadAllAsync(GlobalPosition.Start))
+            count++;
+
+        count.Should().Be(1);
+        reader.Should().BeSameAs(store); // same singleton; the separation is that the component holds only the reader
+    }
+
     [Fact]
     public async Task Materializer_round_trips_a_typed_event()
     {

@@ -67,6 +67,13 @@ types are registered per domain, in bulk via a marker/contract interface
 (`AddEventTypesImplementing<IBankingEvent>()`) or individually. A default domain keeps single-context
 apps simple.
 
+For the read side, each domain is *additionally* exposed as a keyed read-only `IAllStreamReader`, so a
+projection or relay component can be wired with only a reader (plus the keyed `IEventMaterializer` and the
+`ICheckpointStore`) and is structurally unable to write — the DI separation per component that a later
+process split relies on. `EventStoreSubscription.ForReader` builds a catch-up over just that reader; a
+reader that is not the store itself (a future cross-process reader) is treated as non-exact-catch-up, the
+always-correct safe path, since the `ExactCatchup` guarantee belongs to the store.
+
 ### D1 — Capabilities instead of a lowest common denominator
 
 One core interface every provider implements, plus optional interfaces a provider declares. The

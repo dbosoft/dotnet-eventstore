@@ -21,7 +21,10 @@ services.AddEventStore(es => es
         .AddAggregateRepository(Account.Category, id => new Account(id))));
 await using var provider = services.BuildServiceProvider();
 
-var store = provider.GetRequiredKeyedService<IEventStore>(domain);
+// The projection half is wired read-only: a keyed $all reader, a materializer, and a checkpoint store —
+// no write handle. That is the DI separation a later process split relies on. (Writes below go through the
+// aggregate repository, which is a different component.)
+var reader = provider.GetRequiredKeyedService<IAllStreamReader>(domain);
 var materializer = provider.GetRequiredKeyedService<IEventMaterializer>(domain);
 var checkpoints = provider.GetRequiredService<ICheckpointStore>();
 
@@ -35,7 +38,7 @@ Task Project(StoredEvent stored, CancellationToken ct)
     return Task.CompletedTask;
 }
 
-var subscription = new EventStoreSubscription(store, checkpoints, "statements", Project);
+var subscription = EventStoreSubscription.ForReader(reader, checkpoints, "statements", Project);
 
 // === 1. Produce events through the aggregate, into the store ===
 Section("1. Produce events (aggregate → store)");
@@ -61,7 +64,7 @@ PrintStatements();
 // === 4. Rebuild from zero — the same fold, from the start ===
 Section("4. Rebuild the read model from the store (fresh checkpoint, from the start)");
 statements.Clear();
-var rebuild = new EventStoreSubscription(store, new InMemoryCheckpointStore(), "rebuild", Project);
+var rebuild = EventStoreSubscription.ForReader(reader, new InMemoryCheckpointStore(), "rebuild", Project);
 await rebuild.PumpAsync();
 PrintStatements();
 Console.WriteLine("Identical — and it kept the full history, which a latest-state feed could not.");

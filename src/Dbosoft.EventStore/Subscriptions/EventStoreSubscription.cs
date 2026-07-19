@@ -63,11 +63,25 @@ public sealed class EventStoreSubscription
         string checkpointName,
         Func<StoredEvent, CancellationToken, Task> handler,
         SubscriptionOptions? options = null)
-    {
         // Availability is a structural contract: a store supports $all iff it implements IAllStreamReader.
-        if (store is not IAllStreamReader reader)
-            throw new NotSupportedByProviderException(
-                $"The store '{store.GetType().Name}' does not support $all reads, which a subscription requires.");
+        : this(
+            store as IAllStreamReader ?? throw new NotSupportedByProviderException(
+                $"The store '{store.GetType().Name}' does not support $all reads, which a subscription requires."),
+            checkpoints, checkpointName, handler, options)
+    {
+    }
+
+    // The real constructor, over the read-only reader. Private so the two public entry points — the
+    // IEventStore ctor above and the ForReader factory below — never collide in overload resolution when a
+    // store (which is both an IEventStore and an IAllStreamReader) is passed.
+    private EventStoreSubscription(
+        IAllStreamReader reader,
+        ICheckpointStore checkpoints,
+        string checkpointName,
+        Func<StoredEvent, CancellationToken, Task> handler,
+        SubscriptionOptions? options)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
 
         _options = options ?? new SubscriptionOptions();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_options.DeduplicationWindow, nameof(SubscriptionOptions.DeduplicationWindow));
@@ -78,8 +92,32 @@ public sealed class EventStoreSubscription
         _checkpoints = checkpoints;
         _checkpointName = checkpointName;
         _handler = handler;
-        _exactCatchup = store.Capabilities.HasFlag(StoreCapabilities.ExactCatchup);
+
+        // Exact-catch-up is a store behaviour. When the reader is the store itself (the in-process case),
+        // honour its flag; a bare reader — e.g. a cross-process read-only reader that is not an IEventStore —
+        // is treated as non-exact, which is the safe path (safety window + de-dup): always correct, only slower.
+        _exactCatchup = reader is IEventStore store && store.Capabilities.HasFlag(StoreCapabilities.ExactCatchup);
     }
+
+    /// <summary>
+    /// Creates a subscription over a read-only <c>$all</c> reader — the shape a projection or relay
+    /// component gets when it is wired with only the keyed <see cref="IAllStreamReader"/> (plus a checkpoint
+    /// store) and so is structurally unable to write. A reader that is not also the store is treated as
+    /// non-exact-catch-up (the safe path), since the <see cref="StoreCapabilities.ExactCatchup"/> guarantee
+    /// belongs to the store.
+    /// </summary>
+    /// <param name="reader">The read-only global-sequence reader.</param>
+    /// <param name="checkpoints">Durable checkpoint storage; the subscription resumes from the saved position.</param>
+    /// <param name="checkpointName">The name under which this subscription's progress is stored.</param>
+    /// <param name="handler">Invoked once per event, before the checkpoint advances past it.</param>
+    /// <param name="options">Optional tuning; see <see cref="SubscriptionOptions"/>.</param>
+    public static EventStoreSubscription ForReader(
+        IAllStreamReader reader,
+        ICheckpointStore checkpoints,
+        string checkpointName,
+        Func<StoredEvent, CancellationToken, Task> handler,
+        SubscriptionOptions? options = null) =>
+        new(reader, checkpoints, checkpointName, handler, options);
 
     /// <summary>
     /// Creates a subscription whose first run starts at the global position for a wall-clock time,
