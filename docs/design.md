@@ -671,8 +671,15 @@ Two positions the design names and leaves to the application:
 The **inbound** side is not a special primitive — a bus handler uses the normal append API, with the
 materializer mapping the message to an event. The bus adapter itself is a **separate optional
 package**; a **demo in-memory bus** ships as the reference adapter (as InMemory is the reference
-provider — proves the seam, no external dependency), with a real `Dbosoft.EventStore.Rebus` package
-later.
+provider — proves the seam, no external dependency), and `Dbosoft.EventStore.Rebus` is the real one.
+
+`RebusEventRelay` is the outbox: it tails `$all` from a checkpoint and publishes each materialized event
+onto Rebus with the stream id, version, position and event id in the message headers. The order caveat is
+explicit and unavoidable: **Rebus delivers unordered and at-least-once**, so the relay publishes in order
+but consumers cannot rely on receiving in order. The headers carry the ordering identity, and a
+`StreamOrderingTracker` turns the feed back into an in-order, de-duplicated per-stream sequence — a *gap*
+(a later event arriving first) is filled by an ordered read from the store, which stays the authority for
+order. The bus is a low-latency notification; it never becomes the source of truth.
 
 ## 9. Package layout
 
@@ -695,8 +702,7 @@ ships no DI sugar could reference Abstractions alone.
 | `Dbosoft.EventStore.AzureTables` | ATS provider | Core, Azure.Data.Tables |
 | `Dbosoft.EventStore.InMemory` | reference / test implementation | Core |
 | `Dbosoft.EventStore.Testing` | conformance suite | Abstractions, xunit, AwesomeAssertions |
-| `Dbosoft.EventStore.Bus.Demo` (planned) | reference in-memory bus + store↔bus bridge | Core |
-| `Dbosoft.EventStore.Rebus` (later) | Rebus adapter | Core, Rebus |
+| `Dbosoft.EventStore.Rebus` | Rebus adapter (relay, headers, ordering tracker) | Core, Rebus |
 
 ## 10. Phased plan
 

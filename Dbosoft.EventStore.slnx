@@ -12,6 +12,7 @@
     <Project Path="src/Dbosoft.EventStore.EfCore/Dbosoft.EventStore.EfCore.csproj" />
     <Project Path="src/Dbosoft.EventStore.InMemory/Dbosoft.EventStore.InMemory.csproj" />
     <Project Path="src/Dbosoft.EventStore.Primitives/Dbosoft.EventStore.Primitives.csproj" />
+    <Project Path="src/Dbosoft.EventStore.Rebus/Dbosoft.EventStore.Rebus.csproj" />
     <Project Path="src/Dbosoft.EventStore/Dbosoft.EventStore.csproj" />
   </Folder>
   <Folder Name="/test/">
@@ -19,6 +20,7 @@
     <Project Path="test/Dbosoft.EventStore.EfCore.PostgreSql.Tests/Dbosoft.EventStore.EfCore.PostgreSql.Tests.csproj" />
     <Project Path="test/Dbosoft.EventStore.EfCore.SqlServer.Tests/Dbosoft.EventStore.EfCore.SqlServer.Tests.csproj" />
     <Project Path="test/Dbosoft.EventStore.EfCore.Tests/Dbosoft.EventStore.EfCore.Tests.csproj" />
+    <Project Path="test/Dbosoft.EventStore.Rebus.Tests/Dbosoft.EventStore.Rebus.Tests.csproj" />
     <Project Path="test/Dbosoft.EventStore.Testing/Dbosoft.EventStore.Testing.csproj" />
     <Project Path="test/Dbosoft.EventStore.Tests/Dbosoft.EventStore.Tests.csproj" />
   </Folder>

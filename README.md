@@ -123,6 +123,37 @@ var subscription = new EventStoreSubscription(
 await subscription.RunAsync(cancellationToken); // pumps and checkpoints until cancelled
 ```
 
+### Forward to a message bus (Rebus)
+
+`Dbosoft.EventStore.Rebus` relays a domain's `$all` onto [Rebus](https://github.com/rebus-org/Rebus), so
+subscribers consume events as ordinary Rebus messages. Register it next to your Rebus setup:
+
+```csharp
+services.AddRebusEventRelay("tracking"); // forwards the "tracking" domain's $all onto the registered IBus
+```
+
+Each message carries the event's stream id, version, global position and id in its headers.
+
+> **Rebus does not guarantee message order, and delivers at-least-once.** With competing consumers,
+> retries and redelivery, handlers see events out of order and more than once — never rely on arrival
+> order. Read the identity from the headers and sequence per stream. `StreamOrderingTracker` classifies each
+> message as next, duplicate, or a gap to fill from the store (the store stays the authority for order):
+
+```csharp
+if (EventStoreMetadata.TryRead(MessageContext.Current.Headers, out var meta))
+{
+    switch (tracker.Classify(meta.StreamId, meta.StreamVersion))
+    {
+        case StreamMessageOrder.Next:                          // in order — apply and record
+            Apply(message);
+            tracker.MarkApplied(meta.StreamId, meta.StreamVersion);
+            break;
+        case StreamMessageOrder.Duplicate: break;              // already applied — skip
+        case StreamMessageOrder.Gap: CatchUpFromStore(meta); break; // read the missing versions in order
+    }
+}
+```
+
 ## More
 
 - **Snapshots** — implement `ISnapshotable` on an aggregate and pass a snapshot policy to
