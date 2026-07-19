@@ -153,6 +153,10 @@ that only has the bus must configure Rebus for ordered delivery (single worker, 
 accept best-effort — the lower-level `StreamOrderingTracker` classifies each message as next / duplicate /
 gap if you want to handle it yourself.
 
+A runnable end-to-end walkthrough — direct-off-the-bus feed, store-authoritative read model, scrambled/
+duplicated delivery, and a rebuild — is in
+[`samples/Dbosoft.EventStore.Sample.RebusReadModel`](samples/Dbosoft.EventStore.Sample.RebusReadModel).
+
 ## More
 
 - **Snapshots** — implement `ISnapshotable` on an aggregate and pass a snapshot policy to

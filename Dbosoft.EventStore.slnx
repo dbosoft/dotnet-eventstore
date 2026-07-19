@@ -2,6 +2,7 @@
   <Folder Name="/samples/">
     <Project Path="samples/Dbosoft.EventStore.Sample.BankAccount/Dbosoft.EventStore.Sample.BankAccount.csproj" />
     <Project Path="samples/Dbosoft.EventStore.Sample.IssueTracker/Dbosoft.EventStore.Sample.IssueTracker.csproj" />
+    <Project Path="samples/Dbosoft.EventStore.Sample.RebusReadModel/Dbosoft.EventStore.Sample.RebusReadModel.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Dbosoft.EventStore.Abstractions/Dbosoft.EventStore.Abstractions.csproj" />
