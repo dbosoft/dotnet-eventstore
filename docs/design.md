@@ -676,10 +676,14 @@ provider — proves the seam, no external dependency), and `Dbosoft.EventStore.R
 `RebusEventRelay` is the outbox: it tails `$all` from a checkpoint and publishes each materialized event
 onto Rebus with the stream id, version, position and event id in the message headers. The order caveat is
 explicit and unavoidable: **Rebus delivers unordered and at-least-once**, so the relay publishes in order
-but consumers cannot rely on receiving in order. The headers carry the ordering identity, and a
-`StreamOrderingTracker` turns the feed back into an in-order, de-duplicated per-stream sequence — a *gap*
-(a later event arriving first) is filled by an ordered read from the store, which stays the authority for
-order. The bus is a low-latency notification; it never becomes the source of truth.
+but consumers cannot rely on receiving in order. The resolution is *not* to make the bus ordered — it is
+to treat each message as a **signal** and read the ordered content from the store: `OrderedEventDispatcher`
+applies each stream in ascending version order, exactly once, filling a gap (a later event arriving first)
+by reading the store, whatever order the signals arrive in. The bus is a low-latency notification; the
+store stays the authority for order and never yields it. This needs the consumer to have store access; a
+consumer with only the bus must use an ordered Rebus transport or accept best-effort (the lower-level
+`StreamOrderingTracker` classifies each message so it can). `StoreToBusRelay` (in the InMemory package) is
+the same shape without the Rebus dependency, so the seam is exercised end to end with no external broker.
 
 ## 9. Package layout
 

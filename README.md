@@ -135,24 +135,23 @@ services.AddRebusEventRelay("tracking"); // forwards the "tracking" domain's $al
 Each message carries the event's stream id, version, global position and id in its headers.
 
 > **Rebus does not guarantee message order, and delivers at-least-once.** With competing consumers,
-> retries and redelivery, handlers see events out of order and more than once — never rely on arrival
-> order. Read the identity from the headers and sequence per stream. `StreamOrderingTracker` classifies each
-> message as next, duplicate, or a gap to fill from the store (the store stays the authority for order):
+> retries and redelivery, handlers see events out of order and more than once — never rely on arrival order.
+
+The store solves this: treat each bus message as a *signal* ("stream S has an event at version V") and let
+the store — which *is* ordered — supply the content. `OrderedEventDispatcher` does exactly that: it applies
+each stream in ascending version order, exactly once, filling gaps by reading the store, no matter how the
+signals are ordered or duplicated.
 
 ```csharp
+// A Rebus handler: the bus is only the signal, the store is the authority for order.
 if (EventStoreMetadata.TryRead(MessageContext.Current.Headers, out var meta))
-{
-    switch (tracker.Classify(meta.StreamId, meta.StreamVersion))
-    {
-        case StreamMessageOrder.Next:                          // in order — apply and record
-            Apply(message);
-            tracker.MarkApplied(meta.StreamId, meta.StreamVersion);
-            break;
-        case StreamMessageOrder.Duplicate: break;              // already applied — skip
-        case StreamMessageOrder.Gap: CatchUpFromStore(meta); break; // read the missing versions in order
-    }
-}
+    await dispatcher.DispatchAsync(meta); // in-order, exactly-once, gap-filling per-stream application
 ```
+
+This needs the consumer to have store access (which is why the store, not the bus, orders). A consumer
+that only has the bus must configure Rebus for ordered delivery (single worker, no concurrent handlers) or
+accept best-effort — the lower-level `StreamOrderingTracker` classifies each message as next / duplicate /
+gap if you want to handle it yourself.
 
 ## More
 
