@@ -18,8 +18,8 @@
     <Authors>dbosoft GmbH</Authors>
     <Company>dbosoft GmbH</Company>
     <Product>Dbosoft.EventStore</Product>
-    <PackageProjectUrl>https://github.com/dbosoft/eventstore</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/dbosoft/eventstore</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/dbosoft/dotnet-eventstore</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/dbosoft/dotnet-eventstore</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
