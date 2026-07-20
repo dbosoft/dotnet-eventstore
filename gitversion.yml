@@ -1,6 +1,8 @@
+# Version floor until the first release tag; a tag (vX.Y.Z) overrides this afterwards.
+next-version: 0.1.0
 assembly-versioning-scheme: MajorMinor
-mode: ContinuousDeployment
-branches: {}
-ignore:
-  sha: []
-merge-message-formats: {}
+branches:
+  main:
+    # v5 'ContinuousDeployment' == v6 'ContinuousDelivery': auto-incrementing CI pre-releases.
+    deployment-mode: ContinuousDelivery
+    label: ci
