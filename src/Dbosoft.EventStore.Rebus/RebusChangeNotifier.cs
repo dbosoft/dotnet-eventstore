@@ -18,17 +18,17 @@ public sealed class RebusChangeNotifier(IBus bus) : IChangeNotifier
     private readonly InProcessChangeNotifier _local = new();
 
     /// <summary>
-    /// Signals a write: releases any waiter in this process immediately (so a same-process reader need not
-    /// wait for the round-trip), then publishes an <see cref="EventStoreChanged"/> ping for other processes.
-    /// The publish is best-effort — a transport failure only means remote readers fall back to their poll.
+    /// Signals a write: delivers to any watcher in this process immediately (so a same-process reader need
+    /// not wait for the round-trip), then publishes an <see cref="EventStoreChanged"/> ping for other
+    /// processes. The publish is best-effort — a transport failure only means remote readers fall back to poll.
     /// </summary>
-    public async ValueTask NotifyAsync(string domain, CancellationToken ct = default)
+    public async ValueTask NotifyAsync(string domain, string streamId, CancellationToken ct = default)
     {
         // Local first, so a same-process reader wakes even when the transport is down.
-        await _local.NotifyAsync(domain, ct).ConfigureAwait(false);
+        await _local.NotifyAsync(domain, streamId, ct).ConfigureAwait(false);
         try
         {
-            await bus.Publish(new EventStoreChanged(domain)).ConfigureAwait(false);
+            await bus.Publish(new EventStoreChanged(domain, streamId)).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -38,10 +38,9 @@ public sealed class RebusChangeNotifier(IBus bus) : IChangeNotifier
     }
 
     /// <inheritdoc />
-    public Task WaitForChangeAsync(string domain, CancellationToken ct = default) =>
-        _local.WaitForChangeAsync(domain, ct);
+    public IChangeWatcher Watch(string domain) => _local.Watch(domain);
 
-    // Releases local waiters for a ping that arrived from another process — WITHOUT re-publishing, which
+    // Delivers a ping that arrived from another process to local watchers — WITHOUT re-publishing, which
     // would loop the notification back onto the bus. Called by EventStoreChangedHandler.
-    internal ValueTask ReleaseLocalAsync(string domain) => _local.NotifyAsync(domain);
+    internal ValueTask ReleaseLocalAsync(string domain, string streamId) => _local.NotifyAsync(domain, streamId);
 }

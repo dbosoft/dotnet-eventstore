@@ -42,6 +42,11 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredKeyedService<IEventStore>(key) as IAllStreamReader
                 ?? throw new NotSupportedByProviderException(
                     $"The store for domain '{key}' does not support $all reads, which a read-only reader requires."));
+
+            // The read-only per-stream surface, keyed by domain — a fold-style read model re-derives a
+            // changed stream from it (on a change notification) without a write handle. Every store is an
+            // IEventReader, so this always resolves.
+            services.AddKeyedSingleton<IEventReader>(domain.Name, (sp, key) => sp.GetRequiredKeyedService<IEventStore>(key));
         }
 
         return builder;

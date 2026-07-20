@@ -230,9 +230,11 @@ public sealed class InMemoryEventStore
             }
         }
 
-        // A multi-stream append is a write path beyond the core append, so signal it explicitly — after
-        // the gate, so a slow custom notifier never runs under the lock.
-        NotifyChanged();
+        // A multi-stream append is a write path beyond the core append, so signal each changed stream
+        // explicitly — after the gate, so a slow custom notifier never runs under the lock.
+        foreach (var append in appends)
+            if (append.Events.Count > 0)
+                NotifyChanged(append.StreamId);
         return Task.FromResult<IReadOnlyList<AppendResult>>(results);
     }
 
@@ -394,9 +396,9 @@ public sealed class InMemoryEventStore
             EmitMarker(SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, beforeVersion), streamId);
         }
 
-        // The marker advanced $all, so signal it — after the gate, so a slow custom notifier never runs
-        // under the lock. The no-op path above returns inside the gate and never reaches here.
-        NotifyChanged();
+        // The truncation changed the stream, so signal it — after the gate, so a slow custom notifier never
+        // runs under the lock. The no-op path above returns inside the gate and never reaches here.
+        NotifyChanged(streamId);
         return Task.CompletedTask;
     }
 
@@ -429,9 +431,9 @@ public sealed class InMemoryEventStore
             EmitMarker(SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null);
         }
 
-        // The tombstone advanced $all, so signal it — after the gate. The already-deleted no-op path above
-        // returns inside the gate and never reaches here.
-        NotifyChanged();
+        // The deletion changed the stream, so signal it — after the gate. The already-deleted no-op path
+        // above returns inside the gate and never reaches here.
+        NotifyChanged(streamId);
         return Task.CompletedTask;
     }
 
@@ -463,8 +465,8 @@ public sealed class InMemoryEventStore
             EmitMarker(SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId);
         }
 
-        // The redaction marker advanced $all, so signal it — after the gate.
-        NotifyChanged();
+        // The redaction changed the stream, so signal it — after the gate.
+        NotifyChanged(streamId);
         return Task.CompletedTask;
     }
 

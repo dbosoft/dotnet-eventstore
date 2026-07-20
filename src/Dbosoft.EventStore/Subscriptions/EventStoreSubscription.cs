@@ -203,33 +203,39 @@ public sealed class EventStoreSubscription
     /// </summary>
     public async Task RunAsync(CancellationToken ct = default)
     {
+        // A change watcher (if configured) wakes the loop on a write; the changed stream id is not needed
+        // here, since the pump re-reads $all from the checkpoint. Polling is the backstop for a missed signal.
+        using var watcher = _options is { ChangeNotifier: { } notifier, NotifyKey: { } key }
+            ? notifier.Watch(key)
+            : null;
+
         while (!ct.IsCancellationRequested)
         {
             var dispatched = await PumpAsync(ct).ConfigureAwait(false);
             if (dispatched == 0)
-                await WaitForWorkAsync(ct).ConfigureAwait(false);
+                await WaitForWorkAsync(watcher, ct).ConfigureAwait(false);
         }
     }
 
-    // After an empty pump, wait for a change signal if one is configured (waking on a write), bounded by the
-    // poll interval as a backstop; otherwise just poll. A missed signal is caught by the poll tick.
-    private async Task WaitForWorkAsync(CancellationToken ct)
+    // After an empty pump, wait for the next change (bounded by the poll interval as a backstop), or just
+    // poll when no watcher is configured. A missed signal is caught by the poll tick.
+    private async Task WaitForWorkAsync(IChangeWatcher? watcher, CancellationToken ct)
     {
-        if (_options is { ChangeNotifier: { } notifier, NotifyKey: { } key })
-        {
-            try
-            {
-                await notifier.WaitForChangeAsync(key, ct)
-                    .WaitAsync(_options.PollInterval, _options.TimeProvider, ct).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                // The poll tick elapsed with no signal — pump anyway.
-            }
-        }
-        else
+        if (watcher is null)
         {
             await Task.Delay(_options.PollInterval, _options.TimeProvider, ct).ConfigureAwait(false);
+            return;
+        }
+
+        using var timeout = new CancellationTokenSource(_options.PollInterval, _options.TimeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        try
+        {
+            await watcher.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The poll interval elapsed with no change — pump anyway.
         }
     }
 

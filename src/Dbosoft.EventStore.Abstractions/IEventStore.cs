@@ -8,7 +8,7 @@ namespace Dbosoft.EventStore;
 /// job — a message bus is presupposed; the store provides catch-up reads to feed and replay it.
 /// </summary>
 [PublicAPI]
-public interface IEventStore
+public interface IEventStore : IEventReader
 {
     /// <summary>The optional features this provider supports.</summary>
     StoreCapabilities Capabilities { get; }
@@ -31,19 +31,4 @@ public interface IEventStore
         long expectedVersion,
         IReadOnlyList<EventData> events,
         CancellationToken ct = default);
-
-    /// <summary>
-    /// Reads a stream in the given direction. Forward reads start at <paramref name="fromVersion"/>
-    /// (inclusive, 1-based; <c>0</c> means from the start); backward reads start at that version and
-    /// descend (<c>long.MaxValue</c> means from the end). Yields nothing for a missing stream.
-    /// </summary>
-    IAsyncEnumerable<StoredEvent> ReadStreamAsync(
-        string streamId,
-        ReadDirection direction = ReadDirection.Forwards,
-        long fromVersion = 0,
-        long maxCount = long.MaxValue,
-        CancellationToken ct = default);
-
-    /// <summary>Returns a stream's current state, or <c>null</c> if it does not exist.</summary>
-    Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default);
 }

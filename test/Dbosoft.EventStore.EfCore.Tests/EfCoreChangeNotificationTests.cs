@@ -32,10 +32,11 @@ public sealed class EfCoreChangeNotificationTests
 
         var notifier = sp.GetRequiredService<IChangeNotifier>();
         var store = sp.GetRequiredKeyedService<IEventStore>("banking");
-        var wait = notifier.WaitForChangeAsync("banking");
+        using var watch = notifier.Watch("banking");
 
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
 
-        await wait.WaitAsync(TimeSpan.FromSeconds(2)); // the append woke the waiter — no error means it fired
+        // the append signalled the changed stream, carrying its id across the notifier
+        Assert.Equal("s1", await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
     }
 }

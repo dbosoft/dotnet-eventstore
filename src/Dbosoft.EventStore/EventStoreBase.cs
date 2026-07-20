@@ -43,7 +43,7 @@ public abstract class EventStoreBase : IEventStore
         CancellationToken ct = default)
     {
         var result = await AppendToStreamCoreAsync(streamId, expectedVersion, events, ct).ConfigureAwait(false);
-        NotifyChanged();
+        NotifyChanged(streamId);
         return result;
     }
 
@@ -70,17 +70,17 @@ public abstract class EventStoreBase : IEventStore
     public abstract Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default);
 
     /// <summary>
-    /// Fires the best-effort "something changed" signal for this store's domain, if a notifier is
-    /// configured, so a subscription wakes without waiting out its poll interval. The core append path
-    /// calls this for the provider; a provider calls it after any additional write path it exposes (a
-    /// multi-stream append, a maintenance marker). It never blocks: the in-process notifier completes
-    /// inline, anything slower is fire-and-forget, and a lost signal is caught by the subscription's poll.
+    /// Fires the best-effort "a stream changed" signal for this store's domain, if a notifier is configured,
+    /// so a reader wakes without waiting out its poll interval. The core append path calls this for the
+    /// provider; a provider calls it after any additional write path it exposes (a multi-stream append, a
+    /// maintenance marker), passing the id of the changed stream. It never blocks: the in-process notifier
+    /// completes inline, anything slower is fire-and-forget, and a lost signal is caught by re-reading.
     /// </summary>
-    protected void NotifyChanged()
+    protected void NotifyChanged(string streamId)
     {
         if (_changeNotifier is null)
             return;
-        var pending = _changeNotifier.NotifyAsync(NotifyDomain);
+        var pending = _changeNotifier.NotifyAsync(NotifyDomain, streamId);
         if (!pending.IsCompleted)
             _ = pending.AsTask();
     }

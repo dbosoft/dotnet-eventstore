@@ -15,6 +15,6 @@ public sealed class EventStoreChangedHandler(RebusChangeNotifier notifier) : IHa
     public Task Handle(EventStoreChanged message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        return notifier.ReleaseLocalAsync(message.Domain).AsTask();
+        return notifier.ReleaseLocalAsync(message.Domain, message.StreamId).AsTask();
     }
 }

@@ -34,11 +34,12 @@ public sealed class RebusChangeNotifierTests
             .Start();
         var writerNotifier = new RebusChangeNotifier(writerActivator.Bus);
 
-        var wait = reader.Notifier.WaitForChangeAsync("banking");
+        using var watch = reader.Notifier.Watch("banking");
 
-        await writerNotifier.NotifyAsync("banking");
+        await writerNotifier.NotifyAsync("banking", "lot-42");
 
-        await wait.WaitAsync(TimeSpan.FromSeconds(5)); // the remote write's ping woke the reader
+        // the remote write's ping crossed the bus, carrying the changed stream id to the reader
+        Assert.Equal("lot-42", await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
     }
 
     [Fact]
@@ -50,10 +51,10 @@ public sealed class RebusChangeNotifierTests
             .Start();
         var notifier = new RebusChangeNotifier(activator.Bus);
 
-        var wait = notifier.WaitForChangeAsync("d");
-        await notifier.NotifyAsync("d");
+        using var watch = notifier.Watch("d");
+        await notifier.NotifyAsync("d", "s1");
 
-        await wait.WaitAsync(TimeSpan.FromSeconds(2)); // released locally, no message needed
+        Assert.Equal("s1", await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2))); // delivered locally, no message needed
     }
 
     // Lets the pre-Start handler registration reference a notifier that only exists once the bus is started.

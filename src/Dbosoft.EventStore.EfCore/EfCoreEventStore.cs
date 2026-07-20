@@ -289,10 +289,12 @@ internal sealed class EfCoreEventStore(
                 results[i] = new AppendResult(stagedVersion[i], GlobalPosition.FromSequence(row.Position));
         }
 
-        // A multi-stream append is a write path beyond the core append, so signal it explicitly — only when
-        // it actually wrote (a pure idempotent replay returned above, having changed nothing).
+        // A multi-stream append is a write path beyond the core append, so signal each changed stream — only
+        // when it actually wrote (a pure idempotent replay returned above, having changed nothing).
         if (anyStaged)
-            NotifyChanged();
+            foreach (var append in appends)
+                if (append.Events.Count > 0)
+                    NotifyChanged(append.StreamId);
         return results;
     }
 
@@ -498,7 +500,7 @@ internal sealed class EfCoreEventStore(
         long beforeVersion,
         bool force = false,
         CancellationToken ct = default) =>
-        ExecuteMaintenanceAsync(async (ctx, token) =>
+        ExecuteMaintenanceAsync(streamId, async (ctx, token) =>
         {
             var head = await ctx.Streams.FindAsync([domain, streamId], token).ConfigureAwait(false);
             if (head is null || head.HardDeleted)
@@ -532,7 +534,7 @@ internal sealed class EfCoreEventStore(
         }, transactional: true, ct);
 
     public Task DeleteStreamAsync(string streamId, DeleteMode mode, CancellationToken ct = default) =>
-        ExecuteMaintenanceAsync(async (ctx, token) =>
+        ExecuteMaintenanceAsync(streamId, async (ctx, token) =>
         {
             var head = await ctx.Streams.FindAsync([domain, streamId], token).ConfigureAwait(false);
             if (head is null || head.HardDeleted)
@@ -564,7 +566,7 @@ internal sealed class EfCoreEventStore(
         ReadOnlyMemory<byte> newData,
         ReadOnlyMemory<byte>? newMetadata = null,
         CancellationToken ct = default) =>
-        ExecuteMaintenanceAsync(async (ctx, token) =>
+        ExecuteMaintenanceAsync(streamId, async (ctx, token) =>
         {
             var row = await ctx.Events
                 .FirstOrDefaultAsync(e => e.Domain == domain && e.StreamId == streamId && e.StreamVersion == version, token)
@@ -655,6 +657,7 @@ internal sealed class EfCoreEventStore(
     // The operation returns true when it made changes to persist, or false for a no-op. Destructive
     // ops that use ExecuteDelete pass transactional: true so the delete and the marker commit together.
     private async Task ExecuteMaintenanceAsync(
+        string streamId,
         Func<EventStoreDbContext, CancellationToken, Task<bool>> operation,
         bool transactional,
         CancellationToken ct)
@@ -679,9 +682,9 @@ internal sealed class EfCoreEventStore(
                 if (tx is not null)
                     await tx.CommitAsync(ct).ConfigureAwait(false);
 
-                // The maintenance op emitted a marker into $all, so signal it — a no-op returned above
+                // The maintenance op changed the stream, so signal it — a no-op returned above
                 // (operation() == false) without reaching here.
-                NotifyChanged();
+                NotifyChanged(streamId);
                 return;
             }
             catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException && attempt < maxAttempts)

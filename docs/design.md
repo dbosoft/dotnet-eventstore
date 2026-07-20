@@ -67,12 +67,13 @@ types are registered per domain, in bulk via a marker/contract interface
 (`AddEventTypesImplementing<IBankingEvent>()`) or individually. A default domain keeps single-context
 apps simple.
 
-For the read side, each domain is *additionally* exposed as a keyed read-only `IAllStreamReader`, so a
-projection or relay component can be wired with only a reader (plus the keyed `IEventMaterializer` and the
-`ICheckpointStore`) and is structurally unable to write — the DI separation per component that a later
-process split relies on. `EventStoreSubscription.ForReader` builds a catch-up over just that reader; a
-reader that is not the store itself (a future cross-process reader) is treated as non-exact-catch-up, the
-always-correct safe path, since the `ExactCatchup` guarantee belongs to the store.
+For the read side, each domain is *additionally* exposed as two keyed read-only surfaces, so a projection or
+relay component can be wired without a write handle — the DI separation per component that a later process
+split relies on. `IAllStreamReader` reads the global `$all` sequence (for an ordered catch-up); `IEventReader`
+reads a single stream (for a fold that re-derives one stream at a time). `EventStoreSubscription.ForReader`
+builds a catch-up over the `$all` reader; a reader that is not the store itself (a future cross-process
+reader) is treated as non-exact-catch-up, the always-correct safe path, since the `ExactCatchup` guarantee
+belongs to the store.
 
 ### D1 — Capabilities instead of a lowest common denominator
 
@@ -666,16 +667,19 @@ nothing more:
   message into an append. This is the one pipeline read models and the bridge share; it is no longer
   locked inside the aggregate repository.
 - **`ICheckpointStore`** — a relay or a read-model rebuild remembers how far it read.
-- **`IChangeNotifier`** (optional) — a best-effort "something changed" ping so a subscription wakes on a
-  write instead of waiting out its poll interval, **without a bus**. It carries no content and no ordering,
-  and polling is the backstop, so a lost ping only costs latency — which is exactly why any transport works
-  (in-process by default; a cross-process bridge over a bus/Redis/Postgres `LISTEN/NOTIFY` is one pluggable
-  impl). The signal is wired **once in the core**: `EventStoreBase` fires it on the append path as a
-  template method, so every provider signals uniformly by deriving from it rather than each re-implementing
-  the plumbing; a provider calls the same protected hook after any further write it exposes (a multi-stream
-  append, a maintenance marker). The store stays the source of truth. `Dbosoft.EventStore.Rebus` ships one
-  cross-process bridge: `NotifyAsync` publishes an `EventStoreChanged` ping and a handler releases the
-  receiving process's local waiters — a wake signal over the bus, deliberately not event delivery on it.
+- **`IChangeNotifier`** (optional) — a best-effort "a stream changed" ping, **without a bus**, carrying the
+  id of the changed stream and nothing else. Polling (or re-reading) is the backstop, so a lost ping only
+  costs latency — which is why any transport works (in-process by default; a cross-process bridge over a
+  bus/Redis/Postgres `LISTEN/NOTIFY` is one pluggable impl). Two reader shapes use it: an ordered `$all`
+  subscription treats any signal as a wake and re-reads from its checkpoint (ignoring which stream changed);
+  a **fold-style read model** re-derives just the changed stream — for that it needs the stream id, and the
+  watcher coalesces repeated changes to a stream but never drops a distinct one between reads. The signal is
+  wired **once in the core**: `EventStoreBase` fires it on the append path as a template method, so every
+  provider signals uniformly rather than re-implementing the plumbing; a provider calls the same protected
+  hook (with the affected stream id) after any further write it exposes (a multi-stream append, a maintenance
+  marker). The store stays the source of truth. `Dbosoft.EventStore.Rebus` ships one cross-process bridge:
+  `NotifyAsync` publishes an `EventStoreChanged` ping and a handler delivers it to the receiving process's
+  watchers — a wake signal over the bus, deliberately not event delivery on it.
 
 Two positions the design names and leaves to the application:
 
