@@ -69,11 +69,11 @@ projection rebuild).
 
 ## Testing
 
-`Dbosoft.EventStore.Testing` is a **public** package: an abstract `EventStoreConformanceTests` suite each
-provider inherits via a fixture. It is capability-gated — a provider that does not implement, say, `ITruncatable`
-skips those tests instead of faking them. It is public so a third-party provider can validate its
-implementation against the same contract. The suite is built together with the abstractions: it *is* the
-contract.
+`Dbosoft.EventStore.Testing` is the in-repo conformance harness: an abstract `EventStoreConformanceTests`
+suite each provider inherits via a fixture. It is capability-gated — a provider that does not implement, say,
+`ITruncatable` skips those tests instead of faking them. Every shipped provider runs the same suite, so the
+suite *is* the contract. It is not published as a package (it would pull the test framework into consumers);
+it lives alongside the providers it validates.
 
 ## Package layout
 
@@ -90,7 +90,9 @@ The contract stack is layered `Primitives → Abstractions → Core`, all under 
 | `Dbosoft.EventStore.EfCore.Sqlite` / `.SqlServer` / `.PostgreSql` | EF Core dialect + `UseXxx` registration |
 | `Dbosoft.EventStore.AzureTables` | Azure Table Storage provider |
 | `Dbosoft.EventStore.Rebus` | cross-process change-notification bridge over Rebus (not a bus adapter) |
-| `Dbosoft.EventStore.Testing` | the public conformance suite |
+
+The `Dbosoft.EventStore.Testing` project holds the shared conformance suite the providers run against. It is
+part of the repository but not a shipped package.
 
 A provider package references Core so it can add a `UseXxx(this EventStoreBuilder)` DI extension. A third-party
 provider that ships no DI sugar could reference Abstractions alone.
