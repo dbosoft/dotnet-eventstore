@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>AuctionHouse.UIModule</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AuctionHouse.Contracts\AuctionHouse.Contracts.csproj" />
+    <ProjectReference Include="..\AuctionHouse.Hosting\AuctionHouse.Hosting.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dbosoft.Hosuto" Version="1.2.0" />
+    <PackageReference Include="Rebus" Version="8.9.2" />
+  </ItemGroup>
+
+</Project>

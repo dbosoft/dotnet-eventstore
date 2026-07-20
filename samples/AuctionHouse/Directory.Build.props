@@ -1,0 +1,17 @@
+<Project>
+
+  <!-- This sample is deliberately isolated from the library's build rules: it uses external packages
+       (Hosuto, Rebus, Blazor) with inline versions and is not part of the main solution or its CI.
+       It does NOT import the repo-root Directory.Build.props, so warnings-as-errors and the library
+       package metadata do not apply here. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

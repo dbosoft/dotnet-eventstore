@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="AuctionHouse.Contracts/AuctionHouse.Contracts.csproj" />
+  <Project Path="AuctionHouse.Hosting/AuctionHouse.Hosting.csproj" />
+  <Project Path="AuctionHouse.WriterModule/AuctionHouse.WriterModule.csproj" />
+  <Project Path="AuctionHouse.ProjectionModule/AuctionHouse.ProjectionModule.csproj" />
+  <Project Path="AuctionHouse.UIModule/AuctionHouse.UIModule.csproj" />
+  <Project Path="AuctionHouse.Server/AuctionHouse.Server.csproj" />
+</Solution>

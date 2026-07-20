@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>AuctionHouse.Server</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AuctionHouse.Contracts\AuctionHouse.Contracts.csproj" />
+    <ProjectReference Include="..\AuctionHouse.Hosting\AuctionHouse.Hosting.csproj" />
+    <ProjectReference Include="..\AuctionHouse.WriterModule\AuctionHouse.WriterModule.csproj" />
+    <ProjectReference Include="..\AuctionHouse.ProjectionModule\AuctionHouse.ProjectionModule.csproj" />
+    <ProjectReference Include="..\AuctionHouse.UIModule\AuctionHouse.UIModule.csproj" />
+    <ProjectReference Include="..\..\..\src\Dbosoft.EventStore.EfCore.Sqlite\Dbosoft.EventStore.EfCore.Sqlite.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dbosoft.Hosuto.Hosting.AspNetCore" Version="1.2.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+  </ItemGroup>
+
+</Project>

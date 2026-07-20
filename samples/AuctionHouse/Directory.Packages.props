@@ -1,0 +1,9 @@
+<Project>
+
+  <!-- Disable central package management for the sample so each project pins its own external versions,
+       independent of the library's Directory.Packages.props one level up. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+</Project>
