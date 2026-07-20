@@ -50,7 +50,7 @@ public sealed class ProjectionRunner(
 
     private Task Project(StoredEvent stored, CancellationToken ct)
     {
-        if (SystemEventTypes.IsSystem(stored.EventType) || !materializer.TryMaterialize(stored, out var @event) || @event is null)
+        if (SystemEventTypes.IsSystem(stored.EventType) || !materializer.TryMaterialize(stored, out var @event))
             return Task.CompletedTask;
 
         var lotId = AuctionDomain.LotId(stored.StreamId);

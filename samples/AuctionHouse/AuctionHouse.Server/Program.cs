@@ -7,16 +7,13 @@ using Dbosoft.EventStore.DependencyInjection;
 using Dbosoft.EventStore.EfCore;
 using Dbosoft.EventStore.EfCore.Sqlite;
 using Dbosoft.Hosuto.Modules.Hosting;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
 // One shared in-memory SQLite database, kept alive for the whole process, is the event store both modules
 // open. Creating the schema once up front means either module can start first without racing on it.
 var connectionString = $"DataSource=file:auction-{Guid.NewGuid():N}?mode=memory&cache=shared";
-using var keepAlive = new SqliteConnection(connectionString);
+await using var keepAlive = new SqliteConnection(connectionString);
 keepAlive.Open();
 await CreateSchemaAsync(connectionString);
 
