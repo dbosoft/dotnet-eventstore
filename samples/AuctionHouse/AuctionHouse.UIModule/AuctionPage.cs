@@ -40,10 +40,10 @@ internal static class AuctionPage
         <body>
         <main>
         <h1>🔨 Auction House</h1>
-        <p class="lede">This grid is the <b>read model</b> — a fold of the event store's <code>$all</code> stream, built by the
-        projection module. Place a bid and the UI sends a command to the writer over the in-memory bus; the writer appends an
-        event; the store's change ping wakes the projection; the fold updates; and this page — pushed over Server-Sent Events —
-        re-renders live. Three DI-separated modules, one process. Open a second tab to watch both update at once.</p>
+        <p class="lede">This grid is the <b>read model</b> — a fold of the event store's <code>$all</code> stream that this UI
+        module builds itself. Place a bid: the UI sends a command to the writer module over the in-memory bus; the writer appends
+        an event; the store's change ping wakes this module's projection; the fold updates; and the page — pushed over Server-Sent
+        Events — re-renders live. Two DI-separated modules, one process. Open a second tab to watch both update at once.</p>
         <label class="who">Bidding as <input type="text" id="who" value="you" /></label>
         <table>
         <thead><tr><th>Lot</th><th>Title</th><th>Seller</th><th>Price</th><th>Bids</th><th>High bidder</th><th>Status</th><th>Your bid</th></tr></thead>
@@ -62,6 +62,8 @@ internal static class AuctionPage
         <script>
         const es = new EventSource('/events');
         es.onmessage = e => render(JSON.parse(e.data));
+        // Live updates rebuild the table, so remember what the user typed per lot and keep it across renders.
+        const typed = {};
         function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
         function who(){ return document.getElementById('who').value || 'you'; }
         function render(lots){
@@ -72,7 +74,10 @@ internal static class AuctionPage
             const tr = document.createElement('tr');
             if(l.Closed) tr.className = 'closed';
             const status = l.Closed ? `<span class="pill">closed · ${esc(l.Winner)}</span>` : '<span class="pill open">open</span>';
-            const action = l.Closed ? '' : `<div class="row"><input type="number" min="0" id="b_${l.LotId}" /><button onclick="bid('${l.LotId}')">Bid</button></div>`;
+            // Pre-fill a bid that beats the current price, so clicking Bid always succeeds; keep an edited value.
+            const suggest = Math.floor(l.Price) + 1;
+            const val = (typed[l.LotId] != null && typed[l.LotId] !== '') ? typed[l.LotId] : suggest;
+            const action = l.Closed ? '' : `<div class="row"><input type="number" min="0" value="${val}" oninput="typed['${l.LotId}']=this.value" id="b_${l.LotId}" /><button onclick="bid('${l.LotId}')">Bid</button></div>`;
             tr.innerHTML =
               `<td>${l.LotId}</td><td>${esc(l.Title)}</td><td>${esc(l.Seller)}</td>` +
               `<td class="price">${l.Price.toFixed(2)}</td><td>${l.BidCount}</td>` +
@@ -84,6 +89,7 @@ internal static class AuctionPage
           const el = document.getElementById('b_' + lotId);
           const v = el && el.value;
           if(!v || +v <= 0) return;
+          delete typed[lotId]; // clear the edit so the next render suggests a fresh higher bid
           await fetch('/bid', { method: 'POST', body: new URLSearchParams({ lotId, amount: v, bidder: who() }) });
         }
         async function listLot(){

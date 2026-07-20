@@ -1,4 +1,3 @@
-using AuctionHouse.Contracts;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Rebus.Transport.InMem;
@@ -24,7 +23,7 @@ public static class AuctionDomain
 public static class QueueNames
 {
     public const string Writer = "auction-writer";
-    public const string Projection = "auction-projection";
+    public const string Ui = "auction-ui";
 }
 
 /// <summary>Registers the cross-cutting resources shared by every module on the host (outer) container.</summary>
@@ -32,14 +31,14 @@ public static class AuctionInfra
 {
     /// <summary>
     /// A single in-memory Rebus network shared by all modules — the trick that lets the in-memory transport
-    /// carry messages across the modules' separate containers (mirrors SAPHub). Plus the shared read store
-    /// and the connection string every module's event store opens.
+    /// carry messages across the modules' separate containers (mirrors SAPHub) — and the connection string
+    /// every module opens its <b>own</b> event store against. That store (a database) is the only state the
+    /// modules share; each module keeps its own read model, bus and handlers private to its container.
     /// </summary>
     public static IServiceCollection AddAuctionSharedInfra(this IServiceCollection services, string connectionString)
     {
         services.TryAddSingleton(new InMemNetwork());
         services.TryAddSingleton(new AuctionConnectionString(connectionString));
-        services.TryAddSingleton<ILotReadStore, InMemoryLotReadStore>();
         return services;
     }
 }

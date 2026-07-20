@@ -9,13 +9,13 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Rebus.Bus;
 
-namespace AuctionHouse.ProjectionModule;
+namespace AuctionHouse.UIModule;
 
 /// <summary>
-/// Tails the store's ordered <c>$all</c> stream and folds each event into the shared read model. It subscribes
-/// to the cross-process change ping and hands the notifier to the subscription, so it wakes the instant the
-/// writer appends — with polling only as the backstop. Delivery is at-least-once, so it skips any event whose
-/// stream version it has already folded (idempotent).
+/// The UI module's own read side: it tails the store's ordered <c>$all</c> stream and folds each event into the
+/// module's read model, which the page then renders. It reads only — the writer lives in another module (another
+/// container) — so the writer's change ping reaches it across the module boundary over the bus, via the Rebus
+/// notify bridge; polling is the backstop. Delivery is at-least-once, so it skips any already-folded version.
 /// </summary>
 public sealed class ProjectionRunner(
     [FromKeyedServices(AuctionDomain.Name)] IAllStreamReader reader,
@@ -43,8 +43,8 @@ public sealed class ProjectionRunner(
             SafetyWindow = TimeSpan.FromMilliseconds(250)
         };
 
-        var subscription = EventStoreSubscription.ForReader(reader, checkpoints, "auction-projection", Project, options);
-        log.LogInformation("Projection tailing $all for domain '{Domain}'", AuctionDomain.Name);
+        var subscription = EventStoreSubscription.ForReader(reader, checkpoints, "auction-ui", Project, options);
+        log.LogInformation("UI projection tailing $all for domain '{Domain}'", AuctionDomain.Name);
         await subscription.RunAsync(stoppingToken).ConfigureAwait(false);
     }
 

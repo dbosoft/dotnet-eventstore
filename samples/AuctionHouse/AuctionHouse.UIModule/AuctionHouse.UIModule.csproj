@@ -11,11 +11,16 @@
   <ItemGroup>
     <ProjectReference Include="..\AuctionHouse.Contracts\AuctionHouse.Contracts.csproj" />
     <ProjectReference Include="..\AuctionHouse.Hosting\AuctionHouse.Hosting.csproj" />
+    <ProjectReference Include="..\..\..\src\Dbosoft.EventStore.EfCore.Sqlite\Dbosoft.EventStore.EfCore.Sqlite.csproj" />
+    <ProjectReference Include="..\..\..\src\Dbosoft.EventStore.Rebus\Dbosoft.EventStore.Rebus.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Dbosoft.Hosuto" Version="1.2.0" />
     <PackageReference Include="Rebus" Version="8.9.2" />
+    <PackageReference Include="Rebus.ServiceProvider" Version="10.7.2" />
+    <!-- Pin the native SQLite lib above the vulnerable 2.1.11 that EF Core Sqlite 10 pulls transitively. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
 </Project>

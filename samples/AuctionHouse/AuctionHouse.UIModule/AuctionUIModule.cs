@@ -2,6 +2,9 @@ using System.Text.Json;
 using System.Threading.Channels;
 using AuctionHouse.Contracts;
 using AuctionHouse.Hosting;
+using Dbosoft.EventStore.DependencyInjection;
+using Dbosoft.EventStore.EfCore.Sqlite;
+using Dbosoft.EventStore.Rebus;
 using Dbosoft.Hosuto.Modules;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -12,10 +15,11 @@ using Rebus.Transport.InMem;
 namespace AuctionHouse.UIModule;
 
 /// <summary>
-/// The UI, hosted as a Hosuto web module. It serves a small server-rendered page whose live updates come over
-/// Server-Sent Events: the page consumes the shared read model (written by the projection module) and re-renders
-/// whenever it changes, and reaches the write side by sending commands to the writer's queue over the shared
-/// bus. Its own container, no write handle on the store.
+/// The read side, hosted as a Hosuto web module. It owns everything the UI needs: a <b>read-only</b> view of the
+/// shared event store, its <b>own</b> read model, and the projection that folds <c>$all</c> into it. The page
+/// pushes updates over Server-Sent Events. It reaches the write side by sending commands to the writer's queue
+/// over the shared bus — its own container, no write handle, and nothing shared with the writer but the store
+/// itself (a database) and the change ping.
 /// </summary>
 public class AuctionUIModule : WebModule
 {
@@ -24,10 +28,22 @@ public class AuctionUIModule : WebModule
     public void ConfigureServices(IServiceProvider sharedSp, IServiceCollection services)
     {
         var network = sharedSp.GetRequiredService<InMemNetwork>();
+        var connectionString = sharedSp.GetRequiredService<AuctionConnectionString>().Value;
 
-        // The shared read model (written by the projection module), and a send-only bus to reach the writer.
-        services.AddSingleton(sharedSp.GetRequiredService<ILotReadStore>());
-        services.AddOneWayModuleBus(network);
+        // A read-only view of the store plus the change-notification bridge (the notifier the subscription
+        // waits on and the handler that releases it when the writer's ping arrives).
+        services.AddEventStore(es => es
+            .UseSqlite(connectionString)
+            .UseRebusNotifications()
+            .AddDomain(AuctionDomain.Name, domain => domain
+                .AddEventTypesImplementing<IAuctionEvent>()));
+
+        // This module's own read model, and the projection that fills it from $all.
+        services.AddSingleton<ILotReadStore, InMemoryLotReadStore>();
+        services.AddHostedService<ProjectionRunner>();
+
+        // A full bus (input queue): it receives the writer's change pings and sends commands to the writer.
+        services.AddModuleBus(network, QueueNames.Ui);
         services.AddScoped<AuctionUiClient>();
         services.AddRouting();
     }
@@ -59,8 +75,8 @@ public class AuctionUIModule : WebModule
         });
     }
 
-    // Server-Sent Events: the last hop of the chain. The change ping already woke the projection and updated the
-    // shared read model; here we push each new snapshot to the browser, which re-renders live.
+    // Server-Sent Events: the last hop of the chain. The change ping already woke the projection and updated
+    // this module's read model; here we push each new snapshot to the browser, which re-renders live.
     private static async Task StreamEventsAsync(HttpContext ctx, ILotReadStore store, CancellationToken ct)
     {
         ctx.Response.Headers.ContentType = "text/event-stream";
