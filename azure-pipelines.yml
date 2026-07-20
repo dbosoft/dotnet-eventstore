@@ -103,11 +103,11 @@ steps:
   inputs:
     ArtifactName: build-packages
 
-- task: NuGetCommand@2
+# dotnet-based push (not NuGetCommand@2, whose NuGet.exe needs mono — absent on Ubuntu 24.04+).
+- task: DotNetCoreCLI@2
   displayName: Publish to project nuget feed
   inputs:
-    command: 'push'
+    command: push
     packagesToPush: '$(Build.ArtifactStagingDirectory)/**/*.nupkg;!$(Build.ArtifactStagingDirectory)/**/*.symbols.nupkg'
-    nuGetFeedType: 'internal'
+    nuGetFeedType: internal
     publishVstsFeed: '59a3608a-9bed-4cb4-9467-6efaaa3cbef5/1e425ef4-e3a0-4927-b4c0-2beff753cb88'
-    allowPackageConflicts: true
