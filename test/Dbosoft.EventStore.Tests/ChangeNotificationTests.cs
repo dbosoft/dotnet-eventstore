@@ -95,4 +95,50 @@ public sealed class ChangeNotificationTests
         {
         }
     }
+
+    [Fact]
+    public async Task Multi_stream_append_signals_each_changed_stream_but_not_an_idempotent_replay()
+    {
+        var notifier = new InProcessChangeNotifier();
+        var store = new InMemoryEventStore(changeNotifier: notifier, notifyDomain: "d");
+        using var watch = notifier.Watch("d");
+
+        StreamAppend[] batch =
+        [
+            new("s1", ExpectedVersion.NoStream, Events(1)),
+            new("s2", ExpectedVersion.NoStream, Events(1))
+        ];
+        await store.AppendToStreamsAsync(batch);
+
+        var signalled = new HashSet<string>
+        {
+            await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)),
+            await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2))
+        };
+        signalled.Should().BeEquivalentTo("s1", "s2");
+
+        // Replaying the exact same batch is an idempotent no-op — it must not signal again.
+        await store.AppendToStreamsAsync(batch);
+        var noMore = watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromMilliseconds(150));
+        await FluentActions.Awaiting(() => noMore).Should().ThrowAsync<TimeoutException>();
+    }
+
+    [Fact]
+    public async Task Maintenance_signals_the_affected_stream_but_a_no_op_does_not()
+    {
+        var notifier = new InProcessChangeNotifier();
+        var store = new InMemoryEventStore(changeNotifier: notifier, notifyDomain: "d");
+        using var watch = notifier.Watch("d");
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+        (await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("s1");
+
+        await store.DeleteStreamAsync("s1", DeleteMode.Soft);
+        (await watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("s1");
+
+        // Deleting an already-soft-deleted stream is a no-op — no signal.
+        await store.DeleteStreamAsync("s1", DeleteMode.Soft);
+        var noMore = watch.WaitAsync().AsTask().WaitAsync(TimeSpan.FromMilliseconds(150));
+        await FluentActions.Awaiting(() => noMore).Should().ThrowAsync<TimeoutException>();
+    }
 }

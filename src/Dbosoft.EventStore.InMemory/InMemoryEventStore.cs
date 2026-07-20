@@ -142,6 +142,7 @@ public sealed class InMemoryEventStore
         ct.ThrowIfCancellationRequested();
 
         AppendResult[] results;
+        var changed = new List<string>(); // streams that actually staged a write (not idempotent replays)
         lock (_gate)
         {
             var seenStreams = new HashSet<string>(StringComparer.Ordinal);
@@ -227,14 +228,15 @@ public sealed class InMemoryEventStore
                 }
 
                 results[i] = new AppendResult(state.Version, LastPosition(state));
+                changed.Add(append.StreamId);
             }
         }
 
-        // A multi-stream append is a write path beyond the core append, so signal each changed stream
-        // explicitly — after the gate, so a slow custom notifier never runs under the lock.
-        foreach (var append in appends)
-            if (append.Events.Count > 0)
-                NotifyChanged(append.StreamId);
+        // A multi-stream append is a write path beyond the core append, so signal each stream that actually
+        // changed — after the gate (a slow custom notifier never runs under the lock), and not for an
+        // idempotent replay, which staged nothing.
+        foreach (var streamId in changed)
+            NotifyChanged(streamId);
         return Task.FromResult<IReadOnlyList<AppendResult>>(results);
     }
 

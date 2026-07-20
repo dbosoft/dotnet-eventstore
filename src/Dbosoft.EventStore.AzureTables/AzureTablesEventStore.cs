@@ -457,6 +457,7 @@ internal sealed class AzureTablesEventStore(
                 SystemEventTypes.StreamTruncated, new StreamTruncatedMarker(streamId, boundary), streamId, ct)
                 .ConfigureAwait(false);
             await SetHeadWatermarkAsync(streamId, "MarkedBefore", boundary, ct).ConfigureAwait(false);
+            NotifyChanged(streamId); // the truncation changed the stream
             return;
         }
     }
@@ -505,6 +506,7 @@ internal sealed class AzureTablesEventStore(
                 SystemEventTypes.StreamDeleted, new StreamDeletedMarker(streamId, mode), inBandStream: null, ct)
                 .ConfigureAwait(false);
             await SetHeadWatermarkAsync(streamId, "DeleteMarked", true, ct).ConfigureAwait(false);
+            NotifyChanged(streamId); // the deletion changed the stream
             return;
         }
     }
@@ -553,6 +555,7 @@ internal sealed class AzureTablesEventStore(
             await EmitMarkerAsync(
                 SystemEventTypes.EventRedacted, new EventRedactedMarker(streamId, version), streamId, ct)
                 .ConfigureAwait(false);
+            NotifyChanged(streamId); // the redaction changed the stream
             return;
         }
     }
@@ -692,7 +695,9 @@ internal sealed class AzureTablesEventStore(
         var streamId = inBandMarkers && inBandStream is not null ? inBandStream : TableSchema.SystemStream;
         var data = JsonSerializer.SerializeToUtf8Bytes(marker, marker.GetType());
         var markerEvent = new EventData(Guid.NewGuid(), eventType, data);
-        await AppendToStreamAsync(streamId, ExpectedVersion.Any, [markerEvent], ct).ConfigureAwait(false);
+        // Append the marker without the base template's change signal: the maintenance op signals the affected
+        // stream itself (below), matching the other providers, rather than pinging the marker's ($system) stream.
+        await AppendToStreamCoreAsync(streamId, ExpectedVersion.Any, [markerEvent], ct).ConfigureAwait(false);
     }
 
     // Submits a same-partition transaction (chunked for very large deletes). Returns false on an etag
