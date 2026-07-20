@@ -162,8 +162,9 @@ above — not event delivery.)
 - **Retention** — set `StreamMetadata` (max count / max age) and run `ScavengeAsync` to truncate a stream
   to its policy.
 
-Runnable samples are in [`samples/`](samples). The storage layouts, the capability model, and the
-trade-offs behind each provider are written up in [`docs/design.md`](docs/design.md).
+Runnable samples are in [`samples/`](samples). Full documentation — concepts, providers and capabilities,
+aggregates and snapshots, serialization, subscriptions, read models, maintenance and bus integration — is
+in [`docs/`](docs/README.md).
 
 ## License
 
