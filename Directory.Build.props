@@ -24,4 +24,17 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
+  <PropertyGroup Label="Packaging">
+    <!-- The package version is supplied by GitVersion in CI (see azure-pipelines.yml); a local pack
+         falls back to the SDK default. Only IsPackable projects produce packages. -->
+    <!-- Source Link: publish the commit-pinned repository URL and embed untracked sources into the PDB,
+         so consumers can step into the exact source. SDK-provided on net8+, no extra package needed. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <!-- Ship the PDB inside the package so symbols travel with it. -->
+    <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
+    <!-- Deterministic, path-normalized build on the CI agent (Azure Pipelines sets TF_BUILD). -->
+    <ContinuousIntegrationBuild Condition="'$(TF_BUILD)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
 </Project>
