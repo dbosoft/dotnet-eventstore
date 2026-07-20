@@ -1,0 +1,11 @@
+<Project>
+
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <!-- Coverlet data collector for the CI XPlat code-coverage collection, producing the
+       coverage.cobertura.xml the coverage report merges. Inert unless collection is requested. -->
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
