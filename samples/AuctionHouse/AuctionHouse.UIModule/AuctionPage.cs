@@ -40,10 +40,10 @@ internal static class AuctionPage
         <body>
         <main>
         <h1>🔨 Auction House</h1>
-        <p class="lede">This grid is the <b>read model</b> — a fold of the event store's <code>$all</code> stream that this UI
-        module builds itself. Place a bid: the UI sends a command to the writer module over the in-memory bus; the writer appends
-        an event; the store's change ping wakes this module's projection; the fold updates; and the page — pushed over Server-Sent
-        Events — re-renders live. Two DI-separated modules, one process. Open a second tab to watch both update at once.</p>
+        <p class="lede">This grid is the <b>read model</b>, which this UI module builds itself. Place a bid: the UI sends a
+        command to the writer module over the in-memory bus; the writer appends an event; the store's change ping tells this module
+        which lot changed; the projection re-reads just that lot's stream and re-folds its view; and the page — pushed over
+        Server-Sent Events — re-renders live. Two DI-separated modules, one process. Open a second tab to watch both update at once.</p>
         <label class="who">Bidding as <input type="text" id="who" value="you" /></label>
         <table>
         <thead><tr><th>Lot</th><th>Title</th><th>Seller</th><th>Price</th><th>Bids</th><th>High bidder</th><th>Status</th><th>Your bid</th></tr></thead>

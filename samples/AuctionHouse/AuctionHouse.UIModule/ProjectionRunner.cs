@@ -3,7 +3,6 @@ using AuctionHouse.Hosting;
 using Dbosoft.EventStore;
 using Dbosoft.EventStore.Rebus;
 using Dbosoft.EventStore.Serialization;
-using Dbosoft.EventStore.Subscriptions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -12,59 +11,81 @@ using Rebus.Bus;
 namespace AuctionHouse.UIModule;
 
 /// <summary>
-/// The UI module's own read side: it tails the store's ordered <c>$all</c> stream and folds each event into the
-/// module's read model, which the page then renders. It reads only — the writer lives in another module (another
-/// container) — so the writer's change ping reaches it across the module boundary over the bus, via the Rebus
-/// notify bridge; polling is the backstop. Delivery is at-least-once, so it skips any already-folded version.
+/// Keeps the UI's read model current — <b>not</b> with an ordered <c>$all</c> catch-up, but by reacting to a
+/// "this stream changed" signal: it re-reads that one lot's stream and re-folds its whole view. Because the
+/// read is a pure function of the committed stream, it is idempotent and self-healing — there is no global
+/// position, no checkpoint and no safety window, and a lost signal only means a lot stays stale until the next
+/// signal or the periodic sweep. The writer's ping reaches this module across the bus (the Rebus notify bridge).
 /// </summary>
 public sealed class ProjectionRunner(
-    [FromKeyedServices(AuctionDomain.Name)] IAllStreamReader reader,
+    [FromKeyedServices(AuctionDomain.Name)] IEventReader reader,
+    [FromKeyedServices(AuctionDomain.Name)] IAllStreamReader allReader,
     [FromKeyedServices(AuctionDomain.Name)] IEventMaterializer materializer,
-    ICheckpointStore checkpoints,
     IChangeNotifier notifier,
     ILotReadStore readStore,
     IBus bus,
     ILogger<ProjectionRunner> log) : BackgroundService
 {
+    private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(10);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Receive the writer's cross-module change pings over the bus.
+        // Receive the writer's cross-module change pings over the bus, and watch for the changed stream ids.
         await bus.SubscribeToEventStoreChangesAsync().ConfigureAwait(false);
+        using var watcher = notifier.Watch(AuctionDomain.Name);
+        log.LogInformation("UI projection watching '{Domain}' for changed lots", AuctionDomain.Name);
 
-        var options = new SubscriptionOptions
+        await SweepAsync(stoppingToken).ConfigureAwait(false); // pick up anything listed before we started
+
+        while (!stoppingToken.IsCancellationRequested)
         {
-            ChangeNotifier = notifier,     // wake on the ping...
-            NotifyKey = AuctionDomain.Name,
-            PollInterval = TimeSpan.FromSeconds(1), // ...with a short poll as the backstop for any missed ping
+            string streamId;
+            try
+            {
+                using var timeout = new CancellationTokenSource(SweepInterval);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, timeout.Token);
+                streamId = await watcher.WaitAsync(linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+            {
+                await SweepAsync(stoppingToken).ConfigureAwait(false); // backstop for any missed ping
+                continue;
+            }
 
-            // EF Core assigns $all positions before commit, so the subscription holds back events newer than
-            // this window to stay complete under concurrent appends. A single writer here commits in order, so
-            // a small window keeps the UI snappy while still guarding the rare race. (Default is 5s.)
-            SafetyWindow = TimeSpan.FromMilliseconds(250)
-        };
-
-        var subscription = EventStoreSubscription.ForReader(reader, checkpoints, "auction-ui", Project, options);
-        log.LogInformation("UI projection tailing $all for domain '{Domain}'", AuctionDomain.Name);
-        await subscription.RunAsync(stoppingToken).ConfigureAwait(false);
+            await RederiveAsync(streamId, stoppingToken).ConfigureAwait(false);
+        }
     }
 
-    private Task Project(StoredEvent stored, CancellationToken ct)
+    // Re-read one changed lot's stream and re-fold its whole view — the unit of work.
+    private async Task RederiveAsync(string streamId, CancellationToken ct)
     {
-        if (SystemEventTypes.IsSystem(stored.EventType) || !materializer.TryMaterialize(stored, out var @event))
-            return Task.CompletedTask;
+        var lotId = AuctionDomain.LotId(streamId);
+        LotView? view = null;
+        await foreach (var stored in reader.ReadStreamAsync(streamId, ct: ct).ConfigureAwait(false))
+        {
+            if (SystemEventTypes.IsSystem(stored.EventType) || !materializer.TryMaterialize(stored, out var @event))
+                continue;
+            view = Fold(view, lotId, @event);
+        }
 
-        var lotId = AuctionDomain.LotId(stored.StreamId);
-        var current = readStore.Get(lotId);
-        if (current is not null && stored.StreamVersion <= current.LastVersion)
-            return Task.CompletedTask; // already folded (a re-delivery) — skip
+        if (view is null)
+            return;
 
-        var next = Fold(current, lotId, @event);
-        if (next is null)
-            return Task.CompletedTask;
+        readStore.Upsert(view);
+        log.LogInformation("Re-derived lot {LotId} -> price {Price} ({Bids} bids)", lotId, view.CurrentPrice, view.BidCount);
+    }
 
-        readStore.Upsert(next with { LastVersion = stored.StreamVersion });
-        log.LogInformation("Folded {Event} on lot {LotId} -> price {Price}", @event.GetType().Name, lotId, next.CurrentPrice);
-        return Task.CompletedTask;
+    // Backstop: discover every lot from $all and re-derive each. Only a safety net for a missed ping — the
+    // per-stream re-derive above is the live path.
+    private async Task SweepAsync(CancellationToken ct)
+    {
+        var streams = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var stored in allReader.ReadAllAsync(GlobalPosition.Start, ct: ct).ConfigureAwait(false))
+            if (!SystemEventTypes.IsSystem(stored.EventType))
+                streams.Add(stored.StreamId);
+
+        foreach (var streamId in streams)
+            await RederiveAsync(streamId, ct).ConfigureAwait(false);
     }
 
     private static LotView? Fold(LotView? current, string lotId, object @event) => @event switch

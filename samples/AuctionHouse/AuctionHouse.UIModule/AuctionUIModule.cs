@@ -15,11 +15,12 @@ using Rebus.Transport.InMem;
 namespace AuctionHouse.UIModule;
 
 /// <summary>
-/// The read side, hosted as a Hosuto web module. It owns everything the UI needs: a <b>read-only</b> view of the
-/// shared event store, its <b>own</b> read model, and the projection that folds <c>$all</c> into it. The page
-/// pushes updates over Server-Sent Events. It reaches the write side by sending commands to the writer's queue
-/// over the shared bus — its own container, no write handle, and nothing shared with the writer but the store
-/// itself (a database) and the change ping.
+/// The read side + UI, hosted as a Hosuto web module. It owns everything the UI needs in its own container: a
+/// <b>read-only</b> view of the shared event store, its <b>own</b> read model, and the projection that keeps it
+/// current. That projection is not a catch-up over <c>$all</c> — it just reacts to a "this stream changed"
+/// signal by re-reading that one stream and re-folding its view (see <see cref="ProjectionRunner"/>). The page
+/// pushes the read model to the browser over Server-Sent Events, and reaches the write side by sending commands
+/// to the writer's queue over the shared bus. No write handle on the store.
 /// </summary>
 public class AuctionUIModule : WebModule
 {
@@ -30,15 +31,15 @@ public class AuctionUIModule : WebModule
         var network = sharedSp.GetRequiredService<InMemNetwork>();
         var connectionString = sharedSp.GetRequiredService<AuctionConnectionString>().Value;
 
-        // A read-only view of the store plus the change-notification bridge (the notifier the subscription
-        // waits on and the handler that releases it when the writer's ping arrives).
+        // A read-only view of the store plus the change-notification bridge, so the projection can re-read a
+        // changed stream and be woken across the module boundary by the writer's ping.
         services.AddEventStore(es => es
             .UseSqlite(connectionString)
             .UseRebusNotifications()
             .AddDomain(AuctionDomain.Name, domain => domain
                 .AddEventTypesImplementing<IAuctionEvent>()));
 
-        // This module's own read model, and the projection that fills it from $all.
+        // This module's own read model, and the projection that re-derives changed lots into it.
         services.AddSingleton<ILotReadStore, InMemoryLotReadStore>();
         services.AddHostedService<ProjectionRunner>();
 
@@ -75,15 +76,14 @@ public class AuctionUIModule : WebModule
         });
     }
 
-    // Server-Sent Events: the last hop of the chain. The change ping already woke the projection and updated
-    // this module's read model; here we push each new snapshot to the browser, which re-renders live.
+    // Server-Sent Events: the last hop of the chain. The change ping already woke the projection, which
+    // re-derived the changed lot into this module's read model; here we push each new snapshot to the browser.
     private static async Task StreamEventsAsync(HttpContext ctx, ILotReadStore store, CancellationToken ct)
     {
         ctx.Response.Headers.ContentType = "text/event-stream";
         ctx.Response.Headers.CacheControl = "no-cache";
 
         var channel = Channel.CreateUnbounded<string>();
-        void OnChanged() => channel.Writer.TryWrite(Snapshot(store));
         store.Changed += OnChanged;
         try
         {
@@ -99,6 +99,10 @@ public class AuctionUIModule : WebModule
         {
             store.Changed -= OnChanged;
         }
+
+        return;
+
+        void OnChanged() => channel.Writer.TryWrite(Snapshot(store));
     }
 
     private static string Snapshot(ILotReadStore store) =>

@@ -13,9 +13,6 @@ public sealed record LotView
     public bool Closed { get; init; }
     public string? Winner { get; init; }
 
-    /// <summary>The stream version this view has folded up to — lets the projection skip a re-delivered event.</summary>
-    public long LastVersion { get; init; }
-
     /// <summary>The current asking/selling price: the high bid once someone has bid, otherwise the start price.</summary>
     public decimal CurrentPrice => BidCount > 0 ? HighBid : StartPrice;
 }
