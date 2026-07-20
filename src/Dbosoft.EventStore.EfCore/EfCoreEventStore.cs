@@ -64,6 +64,17 @@ internal sealed class EfCoreEventStore(
         {
             await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
+            // Read the stream head before the batch. Under READ COMMITTED each query sees its own snapshot,
+            // and committed data stays visible across successive queries on one connection. Reading the head
+            // first means that if a concurrent writer has advanced the stream, the batch read that follows is
+            // guaranteed to see that writer's events too — so an identical batch is recognized as an
+            // idempotent replay here rather than tripping the expected-version check when a commit lands
+            // between the two reads.
+            var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
+            if (head is { HardDeleted: true })
+                throw new StreamDeletedException(streamId);
+            var current = head?.Version ?? 0;
+
             var existing = await ctx.Events
                 .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
                 .Select(e => new { e.StreamVersion, e.Position })
@@ -81,11 +92,6 @@ internal sealed class EfCoreEventStore(
                     $"The append to stream '{streamId}' partially overlaps events already stored; an append "
                     + "must be either entirely new or an exact replay of a prior batch.");
 
-            var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
-            if (head is { HardDeleted: true })
-                throw new StreamDeletedException(streamId);
-
-            var current = head?.Version ?? 0;
             EnsureExpectedVersion(streamId, expectedVersion, current);
 
             var version = current;
@@ -126,6 +132,16 @@ internal sealed class EfCoreEventStore(
                 // The save failed. Rather than depend on provider-specific error codes to tell a unique-
                 // index violation from anything else, re-read and classify by the resulting state.
                 await using var check = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+                // Read the head version before the batch (see the top of this method): committed data is
+                // visible to every later query on the connection, so if the stream has advanced the batch
+                // read below is guaranteed to see the winner's events. This keeps a concurrent idempotent
+                // replay from being misread as a version conflict when the winner commits between the reads.
+                var actual = await check.Streams.AsNoTracking()
+                    .Where(s => s.Domain == domain && s.StreamId == streamId)
+                    .Select(s => (long?)s.Version)
+                    .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? 0;
+
                 var stored = await check.Events
                     .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
                     .Select(e => new { e.StreamVersion, e.Position })
@@ -138,10 +154,6 @@ internal sealed class EfCoreEventStore(
                     return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
                 }
 
-                var actual = await check.Streams.AsNoTracking()
-                    .Where(s => s.Domain == domain && s.StreamId == streamId)
-                    .Select(s => (long?)s.Version)
-                    .FirstOrDefaultAsync(ct).ConfigureAwait(false) ?? 0;
                 if (stored.Count == 0 && actual == current)
                     throw; // nothing changed and the batch is absent — not a concurrency conflict
 
@@ -195,6 +207,16 @@ internal sealed class EfCoreEventStore(
             var append = appends[i];
             var batchIds = append.Events.Select(e => e.EventId).ToHashSet();
 
+            // Head before batch (see AppendToStreamCoreAsync): reading the head first guarantees the batch
+            // read below sees a concurrent writer's events whenever the stream has advanced, so an identical
+            // batch is recognized as an idempotent replay instead of tripping the expected-version check when
+            // a commit lands between the two reads.
+            var head = await ctx.Streams.FindAsync([domain, append.StreamId], ct).ConfigureAwait(false);
+            if (head is { HardDeleted: true })
+                throw new StreamDeletedException(append.StreamId);
+            var current = head?.Version ?? 0;
+            preVersions[i] = current;
+
             var existing = await ctx.Events
                 .Where(e => e.Domain == domain && e.StreamId == append.StreamId && batchIds.Contains(e.EventId))
                 .Select(e => new { e.StreamVersion, e.Position })
@@ -213,12 +235,6 @@ internal sealed class EfCoreEventStore(
                     $"The append to stream '{append.StreamId}' partially overlaps events already stored; an append "
                     + "must be either entirely new or an exact replay of a prior batch.");
 
-            var head = await ctx.Streams.FindAsync([domain, append.StreamId], ct).ConfigureAwait(false);
-            if (head is { HardDeleted: true })
-                throw new StreamDeletedException(append.StreamId);
-
-            var current = head?.Version ?? 0;
-            preVersions[i] = current;
             EnsureExpectedVersion(append.StreamId, append.ExpectedVersion, current);
 
             if (append.Events.Count == 0)
