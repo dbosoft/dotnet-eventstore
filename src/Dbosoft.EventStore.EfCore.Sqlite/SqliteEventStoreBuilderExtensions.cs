@@ -1,6 +1,7 @@
 using Dbosoft.EventStore.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Dbosoft.EventStore.EfCore.Sqlite;
 
@@ -19,5 +20,10 @@ public static class SqliteEventStoreBuilderExtensions
         Action<SqliteDbContextOptionsBuilder>? configureSqlite = null) =>
         builder.UseEfCore(
             options => options.UseSqlite(connectionString, configureSqlite),
-            model => model.StoreTimestampsAsTicks().UseVersionConcurrencyToken());
+            model => model.StoreTimestampsAsTicks().UseVersionConcurrencyToken(),
+            (options, connection) => options.UseSqlite(connection, sqlite =>
+            {
+                configureSqlite?.Invoke(sqlite);
+                sqlite.ExecutionStrategy(dependencies => new NonRetryingExecutionStrategy(dependencies));
+            }));
 }

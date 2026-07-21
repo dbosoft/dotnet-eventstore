@@ -76,10 +76,26 @@ public abstract class EventStoreBase : IEventStore
     /// maintenance marker), passing the id of the changed stream. It never blocks: the in-process notifier
     /// completes inline, anything slower is fire-and-forget, and a lost signal is caught by re-reading.
     /// </summary>
+    /// <remarks>
+    /// Under an ambient unit of work (<see cref="AmbientEventStoreUnitOfWork.Current"/>) the write is not
+    /// durable until the frame commits, so the signal is deferred to <see cref="IEventStoreUnitOfWork.OnCommitted"/>
+    /// rather than fired now — otherwise a woken reader could look before the commit, see nothing, and miss it.
+    /// </remarks>
     protected void NotifyChanged(string streamId)
     {
         if (_changeNotifier is null)
             return;
+
+        if (AmbientEventStoreUnitOfWork.Current is { } unitOfWork)
+        {
+            // Enlisted write: defer the signal until the borrowed transaction commits. Capture the notifier
+            // and domain so the frame never has to know about either.
+            var notifier = _changeNotifier;
+            var domain = NotifyDomain;
+            unitOfWork.OnCommitted(ct => notifier.NotifyAsync(domain, streamId, ct));
+            return;
+        }
+
         var pending = _changeNotifier.NotifyAsync(NotifyDomain, streamId);
         if (!pending.IsCompleted)
             _ = pending.AsTask();

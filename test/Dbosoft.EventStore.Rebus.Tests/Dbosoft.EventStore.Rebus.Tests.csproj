@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Dbosoft.EventStore.Rebus\Dbosoft.EventStore.Rebus.csproj" />
+    <ProjectReference Include="..\..\src\Dbosoft.EventStore.EfCore.Sqlite\Dbosoft.EventStore.EfCore.Sqlite.csproj" />
   </ItemGroup>
 
   <ItemGroup>

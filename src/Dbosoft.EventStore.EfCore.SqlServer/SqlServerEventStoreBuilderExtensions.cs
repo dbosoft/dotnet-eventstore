@@ -1,6 +1,7 @@
 using Dbosoft.EventStore.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace Dbosoft.EventStore.EfCore.SqlServer;
 
@@ -19,5 +20,12 @@ public static class SqlServerEventStoreBuilderExtensions
         Action<SqlServerDbContextOptionsBuilder>? configureSqlServer = null) =>
         builder.UseEfCore(
             options => options.UseSqlServer(connectionString, configureSqlServer),
-            model => model.UseVersionConcurrencyToken());
+            model => model.UseVersionConcurrencyToken(),
+            (options, connection) => options.UseSqlServer(connection, sqlServer =>
+            {
+                configureSqlServer?.Invoke(sqlServer);
+                // A retrying strategy refuses a user-initiated transaction; the frame supplies the retry
+                // boundary itself (a failed commit rolls the whole frame back and the caller retries).
+                sqlServer.ExecutionStrategy(dependencies => new NonRetryingExecutionStrategy(dependencies));
+            }));
 }

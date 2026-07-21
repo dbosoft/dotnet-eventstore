@@ -42,6 +42,31 @@ changed), so an out-of-process reader wakes on a write. That is a wake signal, n
 [Read models & change notifications](read-models-and-notifications.md) and the `Dbosoft.EventStore.Rebus`
 bridge.
 
+### Transactional enlistment under Rebus
+
+When a handler must write its own state **and** append events atomically, the EF Core provider's
+[transactional enlistment](providers.md#transactional-enlistment) joins a caller-owned transaction. The Rebus
+package bridges that ambient frame onto Rebus's per-message transaction. It is opt-in and takes no dependency
+on EF Core — it resolves only `IEventStoreUnitOfWorkFactory`:
+
+```csharp
+services.AddRebus((configure, provider) => configure
+    .Transport(t => /* … */)
+    .Options(o => o.EnableEventStoreUnitOfWork(
+        provider.GetRequiredService<IEventStoreUnitOfWorkFactory>(),
+        // Only the app knows where its per-message connection + transaction live — typically its own
+        // DbContext, stashed in the transaction context's Items by an earlier step.
+        transactionContext => ResolveMyConnectionAndTransaction(transactionContext))));
+```
+
+The whole handler runs inside the message's unit of work: it works on the app's own `DbContext` and, through
+the ambient frame, on the event store — both **on the same open connection instance and transaction** (a
+shared connection *string* is not enough; that is two connections and two transactions, hence no atomicity).
+The store's appends stage into that transaction. When the message succeeds, the **message's** unit of work
+commits — that one commit makes both the app's state and the events durable together. The store does not
+commit or roll back itself; it only fires its deferred change signals once the transaction has committed (and
+drops them untouched if the message failed). A message whose resolver returns `null` runs with no frame.
+
 ## Modular hosting with Hosuto
 
 The store's DI is designed for the per-component isolation that [Hosuto](https://github.com/dbosoft/Hosuto)

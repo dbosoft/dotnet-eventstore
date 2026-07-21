@@ -1,5 +1,6 @@
 using Dbosoft.EventStore.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
 
 namespace Dbosoft.EventStore.EfCore.PostgreSql;
@@ -19,5 +20,12 @@ public static class PostgreSqlEventStoreBuilderExtensions
         Action<NpgsqlDbContextOptionsBuilder>? configureNpgsql = null) =>
         builder.UseEfCore(
             options => options.UseNpgsql(connectionString, configureNpgsql),
-            model => model.UseVersionConcurrencyToken());
+            model => model.UseVersionConcurrencyToken(),
+            (options, connection) => options.UseNpgsql(connection, npgsql =>
+            {
+                configureNpgsql?.Invoke(npgsql);
+                // A retrying strategy refuses a user-initiated transaction; the frame supplies the retry
+                // boundary itself (a failed commit rolls the whole frame back and the caller retries).
+                npgsql.ExecutionStrategy(dependencies => new NonRetryingExecutionStrategy(dependencies));
+            }));
 }

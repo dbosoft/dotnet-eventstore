@@ -57,6 +57,7 @@ operation **iff** it implements the matching interface:
 | `IStreamMaintenance` | Composite of the four maintenance interfaces above. |
 | `IMultiStreamAppend` | Append to several streams atomically (`AppendToStreamsAsync`). |
 | `IStreamMetadataStore` | Per-stream metadata / retention policy. |
+| `IEnlistableStore` | Enlist writes onto a caller-owned transaction (see [Transactional enlistment](#transactional-enlistment)). |
 
 You branch with an `is`-cast:
 
@@ -101,6 +102,7 @@ public enum StoreCapabilities
 | `IStreamMaintenance` (truncate/delete/redact/scavenge) | ✅ | ✅ | ✅ |
 | `IStreamMetadataStore` (retention) | ✅ | ✅ | ✅ |
 | `IMultiStreamAppend` (atomic multi-stream) | ✅ | ✅ | — |
+| `IEnlistableStore` (transactional enlistment) | — | ✅ | — |
 | `StoreCapabilities.ExactCatchup` | ✅ | — | — |
 | `StoreCapabilities.SnapshotHistory` | ✅ | ✅ | ✅ |
 
@@ -111,3 +113,51 @@ subscription handles that for you (see [completeness](reading-and-subscriptions.
 Azure Tables cannot do a cross-partition atomic append, so it does not offer `IMultiStreamAppend`.
 
 Every provider passes the same conformance suite; a provider only runs the tests for what it declares.
+
+## Transactional enlistment
+
+By default a write owns its own transaction: the EF Core store opens a context per operation and commits it
+immediately. When a consumer needs an append to commit **atomically with its own database writes** — its own
+state changes and the events, all or nothing — the EF Core provider lets the append **enlist onto a
+transaction the caller owns**. This is the `IEnlistableStore` capability; only the EF Core provider offers it
+(in-memory has no transaction, Azure Tables no cross-partition one), and its `IEventStoreUnitOfWorkFactory` is
+registered in DI whenever an `UseXxx`/`UseEfCore` registration can rebind its dialect onto a borrowed
+connection.
+
+The model is a **borrowed frame**, ambient like Rebus's transaction context. The caller owns the connection
+and transaction; the store joins them:
+
+```csharp
+await using var connection = new SqlConnection(connectionString);
+await connection.OpenAsync();
+await using var tx = await connection.BeginTransactionAsync();
+
+// Both writers share this one connection + transaction.
+myStateContext.Database.UseTransaction(tx.GetDbTransaction());     // the consumer's own DbContext
+
+await using (var unitOfWork = unitOfWorkFactory.Enlist(connection, tx.GetDbTransaction()))
+{
+    await store.AppendToStreamAsync("order-42", expectedVersion, events); // enlists — stages, does not commit
+    await myStateContext.SaveChangesAsync();                              // the consumer's own writes
+    await unitOfWork.CommitAsync();  // commits both, then fires the deferred change signals
+}
+```
+
+Both writers must be on the **same** connection (`UseTransaction` requires it) and the same physical database.
+While a frame is ambient (`AmbientEventStoreUnitOfWork.Current`) the enlisted append behaves differently from
+the autonomous one, by necessity:
+
+- It **does not retry** a version conflict against the new head and **does not reclassify** a failed save in
+  place — a failed save dooms the caller's transaction. A conflict (`WrongExpectedVersionException`, or the raw
+  store error) propagates, and the caller rolls the whole frame back and retries. The retry boundary moves up
+  to the caller (or, under Rebus, to message retry).
+- Its **change signal is deferred** to `CommitAsync`, so a reader never wakes on events a rollback discards.
+- **Snapshot and checkpoint writes are not enlisted** — they stay autonomous, appropriate for derived data.
+- Reads (`ReadStreamAsync`, `GetStreamInfoAsync`, …) stay autonomous too, so within an open frame they see
+  only committed data, not the frame's own uncommitted writes.
+
+A `NonRetryingExecutionStrategy` is forced on the enlisted context even when the app enabled
+`EnableRetryOnFailure`, because a retrying strategy refuses a user-initiated transaction.
+
+Under a message bus, the [`Dbosoft.EventStore.Rebus`](bus-and-modules.md#transactional-enlistment-under-rebus)
+package bridges the frame onto Rebus's per-message transaction so a handler's append commits with the message.

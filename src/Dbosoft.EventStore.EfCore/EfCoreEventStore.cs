@@ -20,11 +20,24 @@ internal sealed class EfCoreEventStore(
     TimeSpan tombstoneRetention,
     IChangeNotifier? changeNotifier = null)
     : EventStoreBase(changeNotifier),
-        IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore
+        IAllStreamReader, ITimeNavigable, IStreamMaintenance, IMultiStreamAppend, IStreamMetadataStore,
+        IEnlistableStore
 {
     protected override string NotifyDomain => domain;
 
     public override StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
+
+    // The context to enlist writes onto when a caller's unit of work is ambient, or null to run autonomously.
+    // A frame of a foreign kind is a misconfiguration (only this provider issues frames), so it is rejected
+    // rather than silently ignored — which would quietly break the atomicity the caller asked for.
+    private static EventStoreDbContext? TryGetEnlistedContext() =>
+        AmbientEventStoreUnitOfWork.Current switch
+        {
+            null => null,
+            EfCoreEventStoreUnitOfWork efCore => efCore.Context,
+            _ => throw new InvalidOperationException(
+                "An event store unit of work is active that this EF Core store cannot enlist onto.")
+        };
 
     protected override async Task<AppendResult> AppendToStreamCoreAsync(
         string streamId,
@@ -43,19 +56,41 @@ internal sealed class EfCoreEventStore(
                     $"The append to stream '{streamId}' contains EventId {evt.EventId} more than once.");
         }
 
-        if (events.Count == 0)
-        {
-            // An empty append writes nothing, so it never materializes a stream or clears a soft-
-            // deletion — but it is still a concurrency-checked no-op, honouring the expected version.
-            await using var peek = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-            var peekHead = await peek.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
-            if (peekHead is { HardDeleted: true })
-                throw new StreamDeletedException(streamId);
-            var peekVersion = peekHead?.Version ?? 0;
-            EnsureExpectedVersion(streamId, expectedVersion, peekVersion);
-            return new AppendResult(peekVersion, null);
-        }
+        // Under an ambient unit of work the append joins the caller's transaction and neither retries nor
+        // reclassifies in place (a failed save dooms that transaction); a conflict propagates and the whole
+        // frame rolls back. Without one, it owns its context and transaction and retries as before.
+        if (TryGetEnlistedContext() is { } enlisted)
+            return await AppendEnlistedAsync(enlisted, streamId, expectedVersion, events, batchIds, ct)
+                .ConfigureAwait(false);
+        return await AppendAutonomousAsync(streamId, expectedVersion, events, batchIds, ct).ConfigureAwait(false);
+    }
 
+    private async Task<AppendResult> AppendEnlistedAsync(
+        EventStoreDbContext ctx,
+        string streamId,
+        long expectedVersion,
+        IReadOnlyList<EventData> events,
+        HashSet<Guid> batchIds,
+        CancellationToken ct)
+    {
+        var outcome = await StageAppendAsync(ctx, streamId, expectedVersion, events, batchIds, ct).ConfigureAwait(false);
+        if (outcome.Completed is { } completed)
+            return completed;
+
+        // A conflict surfaces as a DbUpdateException and is left to propagate: the caller's frame rolls back
+        // and retries as a whole, so there is no in-place reclassification against the frame's own uncommitted
+        // (and, after a failed save, doomed) transaction.
+        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        return new AppendResult(outcome.StagedVersion, GlobalPosition.FromSequence(outcome.StagedLastRow!.Position));
+    }
+
+    private async Task<AppendResult> AppendAutonomousAsync(
+        string streamId,
+        long expectedVersion,
+        IReadOnlyList<EventData> events,
+        HashSet<Guid> batchIds,
+        CancellationToken ct)
+    {
         // A lost race is detected at commit as a unique-index violation and classified by re-reading.
         // With ExpectedVersion.Any (or a satisfied StreamExists) the caller does not care which version
         // it lands on, so a version conflict is retried against the new head rather than surfaced.
@@ -64,68 +99,14 @@ internal sealed class EfCoreEventStore(
         {
             await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
-            // Read the stream head before the batch. Under READ COMMITTED each query sees its own snapshot,
-            // and committed data stays visible across successive queries on one connection. Reading the head
-            // first means that if a concurrent writer has advanced the stream, the batch read that follows is
-            // guaranteed to see that writer's events too — so an identical batch is recognized as an
-            // idempotent replay here rather than tripping the expected-version check when a commit lands
-            // between the two reads.
-            var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
-            if (head is { HardDeleted: true })
-                throw new StreamDeletedException(streamId);
-            var current = head?.Version ?? 0;
-
-            var existing = await ctx.Events
-                .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
-                .Select(e => new { e.StreamVersion, e.Position })
-                .ToListAsync(ct).ConfigureAwait(false);
-
-            if (existing.Count == events.Count)
-            {
-                // Exact replay of an already-stored batch: return the outcome of the original append.
-                var last = existing.MaxBy(e => e.StreamVersion)!;
-                return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
-            }
-
-            if (existing.Count > 0)
-                throw new InvalidOperationException(
-                    $"The append to stream '{streamId}' partially overlaps events already stored; an append "
-                    + "must be either entirely new or an exact replay of a prior batch.");
-
-            EnsureExpectedVersion(streamId, expectedVersion, current);
-
-            var version = current;
-            EventRow? lastRow = null;
-            foreach (var evt in events)
-            {
-                version++;
-                lastRow = new EventRow
-                {
-                    Domain = domain,
-                    StreamId = streamId,
-                    StreamVersion = version,
-                    EventId = evt.EventId,
-                    EventType = evt.EventType,
-                    Data = evt.Data.ToArray(),
-                    Metadata = evt.Metadata?.ToArray(),
-                    ContentType = evt.ContentType,
-                    CreatedAt = timeProvider.GetUtcNow()
-                };
-                ctx.Events.Add(lastRow);
-            }
-
-            if (head is null)
-                ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = streamId, Version = version });
-            else
-            {
-                head.Version = version;
-                head.IsDeleted = false;
-            }
+            var outcome = await StageAppendAsync(ctx, streamId, expectedVersion, events, batchIds, ct).ConfigureAwait(false);
+            if (outcome.Completed is { } completed)
+                return completed;
 
             try
             {
                 await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-                return new AppendResult(version, GlobalPosition.FromSequence(lastRow!.Position));
+                return new AppendResult(outcome.StagedVersion, GlobalPosition.FromSequence(outcome.StagedLastRow!.Position));
             }
             catch (Exception ex) when (ex is DbUpdateConcurrencyException or DbUpdateException)
             {
@@ -133,10 +114,10 @@ internal sealed class EfCoreEventStore(
                 // index violation from anything else, re-read and classify by the resulting state.
                 await using var check = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
-                // Read the head version before the batch (see the top of this method): committed data is
-                // visible to every later query on the connection, so if the stream has advanced the batch
-                // read below is guaranteed to see the winner's events. This keeps a concurrent idempotent
-                // replay from being misread as a version conflict when the winner commits between the reads.
+                // Read the head version before the batch (see StageAppendAsync): committed data is visible to
+                // every later query on the connection, so if the stream has advanced the batch read below is
+                // guaranteed to see the winner's events. This keeps a concurrent idempotent replay from being
+                // misread as a version conflict when the winner commits between the reads.
                 var actual = await check.Streams.AsNoTracking()
                     .Where(s => s.Domain == domain && s.StreamId == streamId)
                     .Select(s => (long?)s.Version)
@@ -154,7 +135,7 @@ internal sealed class EfCoreEventStore(
                     return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
                 }
 
-                if (stored.Count == 0 && actual == current)
+                if (stored.Count == 0 && actual == outcome.CurrentVersion)
                     throw; // nothing changed and the batch is absent — not a concurrency conflict
 
                 // A genuine version conflict. Retry against the new head when the caller did not pin a
@@ -165,6 +146,103 @@ internal sealed class EfCoreEventStore(
                 throw new WrongExpectedVersionException(streamId, expectedVersion, actual);
             }
         }
+    }
+
+    // Reads the stream head and stages an append into the given context WITHOUT saving — the shared core of
+    // every append path. Returns a completed result when there is nothing to stage (an exact idempotent
+    // replay of an already-stored batch, or an empty but concurrency-checked append); otherwise the staged
+    // last row and new version. The caller saves, and — autonomously — retries and reclassifies a failed save.
+    private async Task<StageOutcome> StageAppendAsync(
+        EventStoreDbContext ctx,
+        string streamId,
+        long expectedVersion,
+        IReadOnlyList<EventData> events,
+        HashSet<Guid> batchIds,
+        CancellationToken ct)
+    {
+        // Read the stream head before the batch. Under READ COMMITTED each query sees its own snapshot, and
+        // committed data stays visible across successive queries on one connection. Reading the head first
+        // means that if a concurrent writer has advanced the stream, the batch read that follows is guaranteed
+        // to see that writer's events too — so an identical batch is recognized as an idempotent replay here
+        // rather than tripping the expected-version check when a commit lands between the two reads.
+        var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
+        if (head is { HardDeleted: true })
+            throw new StreamDeletedException(streamId);
+        var current = head?.Version ?? 0;
+
+        if (events.Count > 0)
+        {
+            var existing = await ctx.Events
+                .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
+                .Select(e => new { e.StreamVersion, e.Position })
+                .ToListAsync(ct).ConfigureAwait(false);
+
+            if (existing.Count == events.Count)
+            {
+                // Exact replay of an already-stored batch: return the outcome of the original append.
+                var last = existing.MaxBy(e => e.StreamVersion)!;
+                return StageOutcome.Done(
+                    new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position)), current);
+            }
+
+            if (existing.Count > 0)
+                throw new InvalidOperationException(
+                    $"The append to stream '{streamId}' partially overlaps events already stored; an append "
+                    + "must be either entirely new or an exact replay of a prior batch.");
+        }
+
+        EnsureExpectedVersion(streamId, expectedVersion, current);
+
+        // An empty append writes nothing, so it never materializes a stream or clears a soft-deletion — but
+        // it is still a concurrency-checked no-op, honouring the expected version.
+        if (events.Count == 0)
+            return StageOutcome.Done(new AppendResult(current, null), current);
+
+        var version = current;
+        EventRow? lastRow = null;
+        foreach (var evt in events)
+        {
+            version++;
+            lastRow = new EventRow
+            {
+                Domain = domain,
+                StreamId = streamId,
+                StreamVersion = version,
+                EventId = evt.EventId,
+                EventType = evt.EventType,
+                Data = evt.Data.ToArray(),
+                Metadata = evt.Metadata?.ToArray(),
+                ContentType = evt.ContentType,
+                CreatedAt = timeProvider.GetUtcNow()
+            };
+            ctx.Events.Add(lastRow);
+        }
+
+        if (head is null)
+            ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = streamId, Version = version });
+        else
+        {
+            head.Version = version;
+            head.IsDeleted = false;
+        }
+
+        return StageOutcome.Staged(lastRow!, version, current);
+    }
+
+    // The result of staging one append: either a completed result (nothing left to save) or the staged last
+    // row and its new version. CurrentVersion is the head version read before staging — the autonomous path
+    // needs it to tell "nothing changed" from a genuine conflict when reclassifying a failed save.
+    private readonly record struct StageOutcome(
+        AppendResult? Completed,
+        EventRow? StagedLastRow,
+        long StagedVersion,
+        long CurrentVersion)
+    {
+        public static StageOutcome Done(AppendResult result, long currentVersion) =>
+            new(result, null, 0, currentVersion);
+
+        public static StageOutcome Staged(EventRow lastRow, long version, long currentVersion) =>
+            new(null, lastRow, version, currentVersion);
     }
 
     public async Task<IReadOnlyList<AppendResult>> AppendToStreamsAsync(
@@ -192,6 +270,17 @@ internal sealed class EfCoreEventStore(
             }
         }
 
+        // Under an ambient unit of work the batch stages onto the caller's transaction and commits with it;
+        // otherwise it owns one context and transaction so every stream's rows commit together or not at all.
+        if (TryGetEnlistedContext() is { } enlisted)
+            return await AppendToStreamsEnlistedAsync(enlisted, appends, ct).ConfigureAwait(false);
+        return await AppendToStreamsAutonomousAsync(appends, ct).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<AppendResult>> AppendToStreamsAutonomousAsync(
+        IReadOnlyList<StreamAppend> appends,
+        CancellationToken ct)
+    {
         // One context, one transaction: every stream's rows and head update commit together or not at all.
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
         await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
@@ -206,73 +295,16 @@ internal sealed class EfCoreEventStore(
         {
             var append = appends[i];
             var batchIds = append.Events.Select(e => e.EventId).ToHashSet();
-
-            // Head before batch (see AppendToStreamCoreAsync): reading the head first guarantees the batch
-            // read below sees a concurrent writer's events whenever the stream has advanced, so an identical
-            // batch is recognized as an idempotent replay instead of tripping the expected-version check when
-            // a commit lands between the two reads.
-            var head = await ctx.Streams.FindAsync([domain, append.StreamId], ct).ConfigureAwait(false);
-            if (head is { HardDeleted: true })
-                throw new StreamDeletedException(append.StreamId);
-            var current = head?.Version ?? 0;
-            preVersions[i] = current;
-
-            var existing = await ctx.Events
-                .Where(e => e.Domain == domain && e.StreamId == append.StreamId && batchIds.Contains(e.EventId))
-                .Select(e => new { e.StreamVersion, e.Position })
-                .ToListAsync(ct).ConfigureAwait(false);
-
-            if (append.Events.Count > 0 && existing.Count == append.Events.Count)
+            var outcome = await StageAppendAsync(ctx, append.StreamId, append.ExpectedVersion, append.Events, batchIds, ct)
+                .ConfigureAwait(false);
+            preVersions[i] = outcome.CurrentVersion;
+            if (outcome.Completed is { } completed)
             {
-                // Already stored — idempotent replay of this entry; stage nothing for it.
-                var last = existing.MaxBy(e => e.StreamVersion)!;
-                results[i] = new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+                results[i] = completed;
                 continue;
             }
-
-            if (existing.Count > 0)
-                throw new InvalidOperationException(
-                    $"The append to stream '{append.StreamId}' partially overlaps events already stored; an append "
-                    + "must be either entirely new or an exact replay of a prior batch.");
-
-            EnsureExpectedVersion(append.StreamId, append.ExpectedVersion, current);
-
-            if (append.Events.Count == 0)
-            {
-                results[i] = new AppendResult(current, null);
-                continue;
-            }
-
-            var version = current;
-            EventRow? lastRow = null;
-            foreach (var evt in append.Events)
-            {
-                version++;
-                lastRow = new EventRow
-                {
-                    Domain = domain,
-                    StreamId = append.StreamId,
-                    StreamVersion = version,
-                    EventId = evt.EventId,
-                    EventType = evt.EventType,
-                    Data = evt.Data.ToArray(),
-                    Metadata = evt.Metadata?.ToArray(),
-                    ContentType = evt.ContentType,
-                    CreatedAt = timeProvider.GetUtcNow()
-                };
-                ctx.Events.Add(lastRow);
-            }
-
-            if (head is null)
-                ctx.Streams.Add(new StreamRow { Domain = domain, StreamId = append.StreamId, Version = version });
-            else
-            {
-                head.Version = version;
-                head.IsDeleted = false;
-            }
-
-            stagedLastRow[i] = lastRow;
-            stagedVersion[i] = version;
+            stagedLastRow[i] = outcome.StagedLastRow;
+            stagedVersion[i] = outcome.StagedVersion;
             anyStaged = true;
         }
 
@@ -299,14 +331,61 @@ internal sealed class EfCoreEventStore(
             await tx.CommitAsync(ct).ConfigureAwait(false); // nothing written — a clean close of the empty tx
         }
 
+        return BuildMultiAppendResults(appends, results, stagedLastRow, stagedVersion);
+    }
+
+    private async Task<IReadOnlyList<AppendResult>> AppendToStreamsEnlistedAsync(
+        EventStoreDbContext ctx,
+        IReadOnlyList<StreamAppend> appends,
+        CancellationToken ct)
+    {
+        var results = new AppendResult[appends.Count];
+        var stagedLastRow = new EventRow?[appends.Count];
+        var stagedVersion = new long[appends.Count];
+        var anyStaged = false;
+
         for (var i = 0; i < appends.Count; i++)
         {
-            if (stagedLastRow[i] is { } row)
-                results[i] = new AppendResult(stagedVersion[i], GlobalPosition.FromSequence(row.Position));
+            var append = appends[i];
+            var batchIds = append.Events.Select(e => e.EventId).ToHashSet();
+            var outcome = await StageAppendAsync(ctx, append.StreamId, append.ExpectedVersion, append.Events, batchIds, ct)
+                .ConfigureAwait(false);
+            if (outcome.Completed is { } completed)
+            {
+                results[i] = completed;
+                continue;
+            }
+            stagedLastRow[i] = outcome.StagedLastRow;
+            stagedVersion[i] = outcome.StagedVersion;
+            anyStaged = true;
         }
 
-        // A multi-stream append is a write path beyond the core append, so signal each changed stream — only
-        // when it actually wrote (a pure idempotent replay returned above, having changed nothing).
+        // A conflict propagates (the frame rolls back and the caller retries as a whole); there is no in-place
+        // reconciliation against the frame's own uncommitted, and after a failed save doomed, transaction.
+        if (anyStaged)
+            await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        return BuildMultiAppendResults(appends, results, stagedLastRow, stagedVersion);
+    }
+
+    // Fills in the positions of staged entries (known only after save) and signals each stream that actually
+    // wrote — a pure idempotent replay staged nothing and is left untouched. Under a frame the signal is
+    // deferred to commit (see EventStoreBase.NotifyChanged).
+    private IReadOnlyList<AppendResult> BuildMultiAppendResults(
+        IReadOnlyList<StreamAppend> appends,
+        AppendResult[] results,
+        EventRow?[] stagedLastRow,
+        long[] stagedVersion)
+    {
+        var anyStaged = false;
+        for (var i = 0; i < appends.Count; i++)
+        {
+            if (stagedLastRow[i] is not { } row)
+                continue;
+            results[i] = new AppendResult(stagedVersion[i], GlobalPosition.FromSequence(row.Position));
+            anyStaged = true;
+        }
+
         if (anyStaged)
             foreach (var append in appends)
                 if (append.Events.Count > 0)
@@ -449,12 +528,32 @@ internal sealed class EfCoreEventStore(
         ArgumentException.ThrowIfNullOrEmpty(streamId);
         ArgumentNullException.ThrowIfNull(metadata);
 
+        var json = metadata.ToJson();
+
+        // Under a frame, write on the borrowed context: a concurrent-create race cannot be recovered in place
+        // (a failed save dooms that transaction), so it propagates and the caller retries the whole frame.
+        if (TryGetEnlistedContext() is { } enlisted)
+        {
+            await WriteStreamMetadataAsync(enlisted, streamId, json, recoverFromConcurrentCreate: false, ct)
+                .ConfigureAwait(false);
+            return;
+        }
+
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await WriteStreamMetadataAsync(ctx, streamId, json, recoverFromConcurrentCreate: true, ct).ConfigureAwait(false);
+    }
+
+    private async Task WriteStreamMetadataAsync(
+        EventStoreDbContext ctx,
+        string streamId,
+        string json,
+        bool recoverFromConcurrentCreate,
+        CancellationToken ct)
+    {
         var head = await ctx.Streams.FindAsync([domain, streamId], ct).ConfigureAwait(false);
         if (head is { HardDeleted: true })
             throw new StreamDeletedException(streamId);
 
-        var json = metadata.ToJson();
         if (head is null)
         {
             try
@@ -464,7 +563,7 @@ internal sealed class EfCoreEventStore(
                 await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 return;
             }
-            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException)
+            catch (Exception ex) when (recoverFromConcurrentCreate && ex is DbUpdateException or DbUpdateConcurrencyException)
             {
                 // A concurrent writer created the head first; fall through to update its metadata column.
                 ctx.ChangeTracker.Clear();
@@ -678,6 +777,17 @@ internal sealed class EfCoreEventStore(
         bool transactional,
         CancellationToken ct)
     {
+        if (TryGetEnlistedContext() is { } enlisted)
+        {
+            // Enlisted: the frame supplies the transaction, so the transactional flag is moot, nothing commits
+            // here, and a conflict propagates to roll the whole frame back rather than retrying in place.
+            if (!await operation(enlisted, ct).ConfigureAwait(false))
+                return;
+            await enlisted.SaveChangesAsync(ct).ConfigureAwait(false);
+            NotifyChanged(streamId);
+            return;
+        }
+
         // Marker writes contend only with other (rarer) maintenance ops on the one $system head, so a
         // smaller budget than the append path's suffices; retries exist to absorb that contention, not
         // sustained load.
