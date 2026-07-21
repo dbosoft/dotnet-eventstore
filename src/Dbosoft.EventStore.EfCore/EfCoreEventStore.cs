@@ -480,6 +480,43 @@ internal sealed class EfCoreEventStore(
         expectedVersion == ExpectedVersion.Any
         || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);
 
+    // Runs a read against the enlisted context when a frame is ambient — so a read within the frame sees the
+    // frame's own (already-saved but uncommitted) writes and shares the one borrowed connection, rather than
+    // opening a second one. On a single-writer store (SQLite shared cache) that second connection would block
+    // on the frame's pending write and self-lock; here it cannot, because reader and writer are the same
+    // connection and transaction. Without a frame each read owns a fresh context and connection, as before.
+    private async Task<T> ExecuteReadAsync<T>(Func<EventStoreDbContext, Task<T>> read, CancellationToken ct)
+    {
+        if (TryGetEnlistedContext() is { } enlisted)
+            return await read(enlisted).ConfigureAwait(false);
+        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        return await read(ctx).ConfigureAwait(false);
+    }
+
+    private IQueryable<EventRow> StreamQuery(
+        EventStoreDbContext ctx, string streamId, ReadDirection direction, long fromVersion, long maxCount)
+    {
+        var query = ctx.Events.AsNoTracking().Where(e => e.Domain == domain && e.StreamId == streamId);
+        query = direction == ReadDirection.Forwards
+            ? query.Where(e => e.StreamVersion >= Math.Max(1, fromVersion)).OrderBy(e => e.StreamVersion)
+            : query.Where(e => e.StreamVersion <= (fromVersion <= 0 ? long.MaxValue : fromVersion))
+                .OrderByDescending(e => e.StreamVersion);
+
+        return maxCount < int.MaxValue ? query.Take((int)Math.Max(0, maxCount)) : query;
+    }
+
+    private IQueryable<EventRow> AllQuery(
+        EventStoreDbContext ctx, GlobalPosition from, ReadDirection direction, long maxCount)
+    {
+        var fromSequence = ToSequence(from);
+        var query = ctx.Events.AsNoTracking().Where(e => e.Domain == domain);
+        query = direction == ReadDirection.Forwards
+            ? query.Where(e => e.Position > fromSequence).OrderBy(e => e.Position)
+            : query.Where(e => e.Position < fromSequence).OrderByDescending(e => e.Position);
+
+        return maxCount < int.MaxValue ? query.Take((int)Math.Max(0, maxCount)) : query;
+    }
+
     public override async IAsyncEnumerable<StoredEvent> ReadStreamAsync(
         string streamId,
         ReadDirection direction = ReadDirection.Forwards,
@@ -487,41 +524,42 @@ internal sealed class EfCoreEventStore(
         long maxCount = long.MaxValue,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (TryGetEnlistedContext() is { } enlisted)
+        {
+            // Materialize on the borrowed connection before yielding: the frame's single connection must stay
+            // free for the caller's next write, and a data reader held open across yields would block it.
+            foreach (var row in await StreamQuery(enlisted, streamId, direction, fromVersion, maxCount)
+                         .ToListAsync(ct).ConfigureAwait(false))
+                yield return ToStored(row);
+            yield break;
+        }
+
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-
-        var query = ctx.Events.AsNoTracking().Where(e => e.Domain == domain && e.StreamId == streamId);
-        query = direction == ReadDirection.Forwards
-            ? query.Where(e => e.StreamVersion >= Math.Max(1, fromVersion)).OrderBy(e => e.StreamVersion)
-            : query.Where(e => e.StreamVersion <= (fromVersion <= 0 ? long.MaxValue : fromVersion))
-                .OrderByDescending(e => e.StreamVersion);
-
-        if (maxCount < int.MaxValue)
-            query = query.Take((int)Math.Max(0, maxCount));
-
-        await foreach (var row in query.AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
+        await foreach (var row in StreamQuery(ctx, streamId, direction, fromVersion, maxCount)
+                           .AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
             yield return ToStored(row);
     }
 
-    public override async Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var head = await ctx.Streams.AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Domain == domain && s.StreamId == streamId, ct).ConfigureAwait(false);
+    public override Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default) =>
+        ExecuteReadAsync<StreamInfo?>(async ctx =>
+        {
+            var head = await ctx.Streams.AsNoTracking()
+                .FirstOrDefaultAsync(s => s.Domain == domain && s.StreamId == streamId, ct).ConfigureAwait(false);
 
-        return head is null || head.HardDeleted
-            ? null
-            : new StreamInfo(streamId, head.Version, head.TruncatedBefore, head.IsDeleted, head.Metadata);
-    }
+            return head is null || head.HardDeleted
+                ? null
+                : new StreamInfo(streamId, head.Version, head.TruncatedBefore, head.IsDeleted, head.Metadata);
+        }, ct);
 
-    public async Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var json = await ctx.Streams.AsNoTracking()
-            .Where(s => s.Domain == domain && s.StreamId == streamId && !s.HardDeleted)
-            .Select(s => s.Metadata)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return StreamMetadata.FromJson(json);
-    }
+    public Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default) =>
+        ExecuteReadAsync<StreamMetadata?>(async ctx =>
+        {
+            var json = await ctx.Streams.AsNoTracking()
+                .Where(s => s.Domain == domain && s.StreamId == streamId && !s.HardDeleted)
+                .Select(s => s.Metadata)
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+            return StreamMetadata.FromJson(json);
+        }, ct);
 
     public async Task SetStreamMetadataAsync(string streamId, StreamMetadata metadata, CancellationToken ct = default)
     {
@@ -583,32 +621,32 @@ internal sealed class EfCoreEventStore(
         long maxCount = long.MaxValue,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (TryGetEnlistedContext() is { } enlisted)
+        {
+            // Materialize on the borrowed connection before yielding (see ReadStreamAsync).
+            foreach (var row in await AllQuery(enlisted, from, direction, maxCount)
+                         .ToListAsync(ct).ConfigureAwait(false))
+                yield return ToStored(row);
+            yield break;
+        }
+
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var fromSequence = ToSequence(from);
-
-        var query = ctx.Events.AsNoTracking().Where(e => e.Domain == domain);
-        query = direction == ReadDirection.Forwards
-            ? query.Where(e => e.Position > fromSequence).OrderBy(e => e.Position)
-            : query.Where(e => e.Position < fromSequence).OrderByDescending(e => e.Position);
-
-        if (maxCount < int.MaxValue)
-            query = query.Take((int)Math.Max(0, maxCount));
-
-        await foreach (var row in query.AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
+        await foreach (var row in AllQuery(ctx, from, direction, maxCount)
+                           .AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
             yield return ToStored(row);
     }
 
-    public async Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default)
-    {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        var before = await ctx.Events.AsNoTracking()
-            .Where(e => e.Domain == domain && e.CreatedAt < timestamp)
-            .OrderByDescending(e => e.Position)
-            .Select(e => (long?)e.Position)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+    public Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default) =>
+        ExecuteReadAsync(async ctx =>
+        {
+            var before = await ctx.Events.AsNoTracking()
+                .Where(e => e.Domain == domain && e.CreatedAt < timestamp)
+                .OrderByDescending(e => e.Position)
+                .Select(e => (long?)e.Position)
+                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
-        return before is { } sequence ? GlobalPosition.FromSequence(sequence) : GlobalPosition.Start;
-    }
+            return before is { } sequence ? GlobalPosition.FromSequence(sequence) : GlobalPosition.Start;
+        }, ct);
 
     public Task TruncateStreamAsync(
         string streamId,

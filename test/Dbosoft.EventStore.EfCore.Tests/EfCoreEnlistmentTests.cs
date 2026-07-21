@@ -204,6 +204,50 @@ public sealed class EfCoreEnlistmentTests
         threw.Should().BeTrue("event store frames do not nest");
     }
 
+    [Fact]
+    public async Task An_enlisted_read_sees_the_frames_own_uncommitted_append()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+
+        await using var conn = await harness.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+
+        // Reading back within the frame runs on the borrowed connection, so it sees the append that has been
+        // saved into — but not yet committed on — this transaction (read-your-writes). Before the read paths
+        // enlisted, this ran on a second connection and, on shared-cache SQLite, blocked on the frame's own
+        // uncommitted es_streams write until the busy timeout. Bounded so a regression fails fast, not hangs.
+        var info = await store.GetStreamInfoAsync("s1").WaitAsync(TimeSpan.FromSeconds(10));
+        info!.Version.Should().Be(1);
+
+        var read = new List<StoredEvent>();
+        await foreach (var e in store.ReadStreamAsync("s1"))
+            read.Add(e);
+        read.Should().ContainSingle().Which.StreamVersion.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_enlisted_read_of_another_stream_does_not_self_lock()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+
+        await using var conn = await harness.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+
+        // The reported failure: one append holds an uncommitted es_streams write, then a read of a *different*
+        // stream (a per-object correlation read) ran on a second connection and locked the whole es_streams
+        // table on shared-cache SQLite. Enlisted, the read shares the one connection and cannot self-lock.
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+
+        var other = await store.GetStreamInfoAsync("s2").WaitAsync(TimeSpan.FromSeconds(10));
+        other.Should().BeNull("the second stream does not exist yet — and the read must not deadlock reaching that answer");
+    }
+
     private static async Task InsertSideRowAsync(DbConnection connection, DbTransaction transaction, string id, string value)
     {
         await using var cmd = connection.CreateCommand();
