@@ -10,4 +10,9 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
   </ItemGroup>
 
+  <!-- The design-time migrations project reuses this provider's internal model configuration. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dbosoft.EventStore.EfCore.Design" />
+  </ItemGroup>
+
 </Project>

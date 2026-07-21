@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dbosoft.EventStore.EfCore.Design</RootNamespace>
+    <Description>Design-time only: generates the EF Core migrations for the event store providers. Not published.</Description>
+    <!-- Tooling project: used solely by `dotnet ef` to (re)generate migrations. Never shipped, so its
+         Microsoft.EntityFrameworkCore.Design dependency stays out of every published package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Dbosoft.EventStore.EfCore.Sqlite\Dbosoft.EventStore.EfCore.Sqlite.csproj" />
+    <ProjectReference Include="..\Dbosoft.EventStore.EfCore.SqlServer\Dbosoft.EventStore.EfCore.SqlServer.csproj" />
+    <ProjectReference Include="..\Dbosoft.EventStore.EfCore.PostgreSql\Dbosoft.EventStore.EfCore.PostgreSql.csproj" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" />
+  </ItemGroup>
+
+</Project>

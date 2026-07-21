@@ -7,6 +7,7 @@
   <Folder Name="/src/">
     <Project Path="src/Dbosoft.EventStore.Abstractions/Dbosoft.EventStore.Abstractions.csproj" />
     <Project Path="src/Dbosoft.EventStore.AzureTables/Dbosoft.EventStore.AzureTables.csproj" />
+    <Project Path="src/Dbosoft.EventStore.EfCore.Design/Dbosoft.EventStore.EfCore.Design.csproj" />
     <Project Path="src/Dbosoft.EventStore.EfCore.PostgreSql/Dbosoft.EventStore.EfCore.PostgreSql.csproj" />
     <Project Path="src/Dbosoft.EventStore.EfCore.Sqlite/Dbosoft.EventStore.EfCore.Sqlite.csproj" />
     <Project Path="src/Dbosoft.EventStore.EfCore.SqlServer/Dbosoft.EventStore.EfCore.SqlServer.csproj" />

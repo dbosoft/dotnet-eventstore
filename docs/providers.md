@@ -30,6 +30,32 @@ The store holds no `DbContext`; it opens one per operation from a factory, so it
 singleton. Appends are race-free via the unique index on `(domain, stream, version)`: a lost race is a unique
 violation, re-read and classified as an idempotent replay or a concurrency conflict.
 
+#### Schema & migrations
+
+Each EF Core provider **ships** migrations for the store's schema (in the `Sqlite` / `SqlServer` / `PostgreSql`
+package). The library **never applies** them — you decide **if and how**. The registered
+`IDbContextFactory<EventStoreDbContext>` hands out a context that already carries the provider, the migrations
+assembly, and the history table, so you drive whatever fits your deployment:
+
+```csharp
+await using var ctx = await factory.CreateDbContextAsync();
+await ctx.Database.MigrateAsync();                       // apply at startup, or…
+var sql = ctx.Database.GenerateCreateScript();          // …hand a script to a DBA / your migration pipeline
+```
+
+`EnsureCreated()` still works for a throwaway or local schema, but it and migrations are mutually exclusive.
+
+The store records its migrations in **its own** history table — `es_migrations_history` by default, deliberately
+distinct from EF's `__EFMigrationsHistory`. This matters when the store shares a database with your application's
+own migrations: a single shared history table would make each `Migrate()` treat the other's migrations as
+foreign. Override the name (and, on SQL Server / PostgreSQL, the schema) at registration:
+
+```csharp
+services.AddEventStore(es => es
+    .UseSqlServer(connectionString, migrationsHistoryTable: "es_migrations_history", migrationsHistorySchema: "eventstore")
+    .AddDomain("banking", d => d.AddEventTypesImplementing<IBankingEvent>()));
+```
+
 ### Azure Table Storage
 
 `UseAzureTables(connectionString, tablePrefix?)` backs each domain with its own tables and a blob container

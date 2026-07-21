@@ -14,6 +14,14 @@ namespace Dbosoft.EventStore.EfCore;
 [PublicAPI]
 public sealed class EventStoreDbContext : DbContext
 {
+    /// <summary>
+    /// The default migrations-history table the provider registers, distinct from EF's
+    /// <c>__EFMigrationsHistory</c> so the store's migrations never share a history table with a consumer's own
+    /// migrations in the same database. Matches the <c>es_</c> prefix of the store's tables; overridable per
+    /// registration.
+    /// </summary>
+    public const string DefaultMigrationsHistoryTable = "es_migrations_history";
+
     private readonly Action<ModelBuilder>? _configureModel;
 
     /// <summary>Creates the context with the given options.</summary>
