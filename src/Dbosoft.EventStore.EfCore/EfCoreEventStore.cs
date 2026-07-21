@@ -480,17 +480,18 @@ internal sealed class EfCoreEventStore(
         expectedVersion == ExpectedVersion.Any
         || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);
 
-    // Runs a read against the enlisted context when a frame is ambient — so a read within the frame sees the
-    // frame's own (already-saved but uncommitted) writes and shares the one borrowed connection, rather than
-    // opening a second one. On a single-writer store (SQLite shared cache) that second connection would block
-    // on the frame's pending write and self-lock; here it cannot, because reader and writer are the same
-    // connection and transaction. Without a frame each read owns a fresh context and connection, as before.
-    private async Task<T> ExecuteReadAsync<T>(Func<EventStoreDbContext, Task<T>> read, CancellationToken ct)
+    // Runs work against the enlisted context when a frame is ambient — so a read within the frame sees the
+    // frame's own (already-saved but uncommitted) writes, and any write joins the borrowed transaction, both
+    // sharing the one borrowed connection rather than opening a second one. On a single-writer store (SQLite
+    // shared cache) that second connection would block on the frame's pending write and self-lock; here it
+    // cannot, because both run on the same connection and transaction. The enlisted context is the frame's, so
+    // it is never disposed here. Without a frame the work owns a fresh context and connection, as before.
+    private async Task<T> ExecuteOnContextAsync<T>(Func<EventStoreDbContext, Task<T>> work, CancellationToken ct)
     {
         if (TryGetEnlistedContext() is { } enlisted)
-            return await read(enlisted).ConfigureAwait(false);
+            return await work(enlisted).ConfigureAwait(false);
         await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        return await read(ctx).ConfigureAwait(false);
+        return await work(ctx).ConfigureAwait(false);
     }
 
     private IQueryable<EventRow> StreamQuery(
@@ -524,13 +525,20 @@ internal sealed class EfCoreEventStore(
         long maxCount = long.MaxValue,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        // As an iterator, this body runs at enumeration time, so the frame is captured when the caller starts
+        // reading, not when the method is called — read the enumerable, not the call site, for which frame it
+        // joins. The common "await foreach immediately" makes the two coincide.
         if (TryGetEnlistedContext() is { } enlisted)
         {
             // Materialize on the borrowed connection before yielding: the frame's single connection must stay
-            // free for the caller's next write, and a data reader held open across yields would block it.
+            // free for the caller's next write, and a data reader held open across yields would block it. The
+            // in-memory loop then observes cancellation per item, since the buffering read already ran.
             foreach (var row in await StreamQuery(enlisted, streamId, direction, fromVersion, maxCount)
                          .ToListAsync(ct).ConfigureAwait(false))
+            {
+                ct.ThrowIfCancellationRequested();
                 yield return ToStored(row);
+            }
             yield break;
         }
 
@@ -541,7 +549,7 @@ internal sealed class EfCoreEventStore(
     }
 
     public override Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default) =>
-        ExecuteReadAsync<StreamInfo?>(async ctx =>
+        ExecuteOnContextAsync<StreamInfo?>(async ctx =>
         {
             var head = await ctx.Streams.AsNoTracking()
                 .FirstOrDefaultAsync(s => s.Domain == domain && s.StreamId == streamId, ct).ConfigureAwait(false);
@@ -552,7 +560,7 @@ internal sealed class EfCoreEventStore(
         }, ct);
 
     public Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default) =>
-        ExecuteReadAsync<StreamMetadata?>(async ctx =>
+        ExecuteOnContextAsync<StreamMetadata?>(async ctx =>
         {
             var json = await ctx.Streams.AsNoTracking()
                 .Where(s => s.Domain == domain && s.StreamId == streamId && !s.HardDeleted)
@@ -621,12 +629,15 @@ internal sealed class EfCoreEventStore(
         long maxCount = long.MaxValue,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        // Frame captured at enumeration time, and materialize-before-yield inside a frame — see ReadStreamAsync.
         if (TryGetEnlistedContext() is { } enlisted)
         {
-            // Materialize on the borrowed connection before yielding (see ReadStreamAsync).
             foreach (var row in await AllQuery(enlisted, from, direction, maxCount)
                          .ToListAsync(ct).ConfigureAwait(false))
+            {
+                ct.ThrowIfCancellationRequested();
                 yield return ToStored(row);
+            }
             yield break;
         }
 
@@ -637,7 +648,7 @@ internal sealed class EfCoreEventStore(
     }
 
     public Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default) =>
-        ExecuteReadAsync(async ctx =>
+        ExecuteOnContextAsync(async ctx =>
         {
             var before = await ctx.Events.AsNoTracking()
                 .Where(e => e.Domain == domain && e.CreatedAt < timestamp)
@@ -737,17 +748,18 @@ internal sealed class EfCoreEventStore(
     public async Task<ScavengeReport> ScavengeAsync(ScavengeOptions? options = null, CancellationToken ct = default)
     {
         var applyRetention = options?.ApplyRetention ?? true;
-        long removed;
-        int streams;
-        var plan = new List<(string StreamId, long Boundary)>();
 
-        await using (var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false))
+        // The tombstone prune (a write) and retention planning (reads) run on the enlisted context under a
+        // frame, so a scavenge invoked inside a caller's unit of work joins its transaction rather than opening
+        // a second connection that would self-lock against the frame's pending writes on a single-writer store.
+        var (removed, streams, plan) = await ExecuteOnContextAsync(async ctx =>
         {
             var cutoff = timeProvider.GetUtcNow() - tombstoneRetention;
-            removed = await ctx.Events
+            long removedCount = await ctx.Events
                 .Where(e => e.Domain == domain && e.StreamId == SystemEventTypes.SystemStream && e.CreatedAt < cutoff)
                 .ExecuteDeleteAsync(ct).ConfigureAwait(false);
-            streams = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
+            var streamCount = await ctx.Streams.CountAsync(s => s.Domain == domain, ct).ConfigureAwait(false);
+            var retentionPlan = new List<(string StreamId, long Boundary)>();
 
             if (applyRetention)
             {
@@ -779,12 +791,14 @@ internal sealed class EfCoreEventStore(
 
                     if (boundary > row.TruncatedBefore)
                     {
-                        removed += boundary - row.TruncatedBefore; // the contiguous versions being dropped
-                        plan.Add((row.StreamId, boundary));
+                        removedCount += boundary - row.TruncatedBefore; // the contiguous versions being dropped
+                        retentionPlan.Add((row.StreamId, boundary));
                     }
                 }
             }
-        }
+
+            return (removedCount, streamCount, retentionPlan);
+        }, ct).ConfigureAwait(false);
 
         // Force-truncate outside the query context; each call opens its own transaction and emits the
         // retention truncation's marker so read models learn to forget. A stream deleted between planning

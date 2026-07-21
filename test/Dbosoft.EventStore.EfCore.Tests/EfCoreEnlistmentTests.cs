@@ -248,6 +248,62 @@ public sealed class EfCoreEnlistmentTests
         other.Should().BeNull("the second stream does not exist yet — and the read must not deadlock reaching that answer");
     }
 
+    [Fact]
+    public async Task An_enlisted_streaming_read_holds_no_open_reader_so_a_write_can_follow_mid_stream()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+
+        await using var conn = await harness.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(2));
+
+        // The enlisted streaming read materializes up front, so it holds no open data reader on the borrowed
+        // connection. Positioned mid-enumeration, a write on that same connection must therefore succeed rather
+        // than fail with "a data reader is already open" — the reason the enlisted path buffers before yielding.
+        var seen = 0;
+        await using (var e = ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).GetAsyncEnumerator())
+        {
+            (await e.MoveNextAsync()).Should().BeTrue();
+            seen++;
+
+            await store.AppendToStreamAsync("s2", ExpectedVersion.NoStream, Events(1));
+
+            while (await e.MoveNextAsync())
+                seen++;
+        }
+
+        seen.Should().Be(2, "the read is a snapshot of the two events that existed when enumeration began");
+        await unitOfWork.CommitAsync();
+
+        (await store.GetStreamInfoAsync("s1"))!.Version.Should().Be(2);
+        (await store.GetStreamInfoAsync("s2"))!.Version.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_enlisted_scavenge_does_not_self_lock()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+
+        await using var conn = await harness.OpenConnectionAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+
+        // Scavenge prunes tombstones (a write) and reads for retention planning. Inside a frame that holds an
+        // uncommitted append, both must run on the borrowed connection — a second one would lock against the
+        // pending es_streams write on shared-cache SQLite, exactly as the read paths would have.
+        await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+
+        var report = await ((IStreamMaintenance)store).ScavengeAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        report.StreamsProcessed.Should().Be(1, "the frame's own uncommitted stream is visible to the enlisted scavenge");
+
+        await unitOfWork.CommitAsync();
+        (await store.GetStreamInfoAsync("s1"))!.Version.Should().Be(1);
+    }
+
     private static async Task InsertSideRowAsync(DbConnection connection, DbTransaction transaction, string id, string value)
     {
         await using var cmd = connection.CreateCommand();
