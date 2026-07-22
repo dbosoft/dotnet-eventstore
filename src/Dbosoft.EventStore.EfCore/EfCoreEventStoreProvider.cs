@@ -10,7 +10,7 @@ namespace Dbosoft.EventStore.EfCore;
 /// </summary>
 public sealed class EfCoreEventStoreProvider : IEventStoreProvider
 {
-    private readonly IDbContextFactory<EventStoreDbContext> _factory;
+    private readonly EventStoreContextProvider _context;
     private readonly TimeProvider _timeProvider;
     private readonly IChangeNotifier? _changeNotifier;
     private readonly Dictionary<string, DomainOptions> _options;
@@ -24,7 +24,7 @@ public sealed class EfCoreEventStoreProvider : IEventStoreProvider
         TimeProvider timeProvider,
         IChangeNotifier? changeNotifier = null)
     {
-        _factory = factory;
+        _context = new EventStoreContextProvider(factory);
         _timeProvider = timeProvider;
         _changeNotifier = changeNotifier;
         _options = domains
@@ -42,7 +42,7 @@ public sealed class EfCoreEventStoreProvider : IEventStoreProvider
         {
             if (!_options.TryGetValue(key, out var options))
                 throw new ArgumentException($"Domain '{key}' is not registered.", nameof(domain));
-            return new EfCoreEventStore(_factory, key, _timeProvider, options.InBandMarkers, options.TombstoneRetention, _changeNotifier);
+            return new EfCoreEventStore(_context, key, _timeProvider, options.InBandMarkers, options.TombstoneRetention, _changeNotifier);
         });
 
     /// <inheritdoc />
@@ -50,6 +50,6 @@ public sealed class EfCoreEventStoreProvider : IEventStoreProvider
     {
         if (!_options.ContainsKey(domain))
             throw new ArgumentException($"Domain '{domain}' is not registered.", nameof(domain));
-        return _snapshots.GetOrAdd(domain, key => new EfCoreSnapshotStore(_factory, key, _timeProvider));
+        return _snapshots.GetOrAdd(domain, key => new EfCoreSnapshotStore(_context, key, _timeProvider));
     }
 }

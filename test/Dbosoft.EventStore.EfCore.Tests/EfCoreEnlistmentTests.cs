@@ -304,6 +304,94 @@ public sealed class EfCoreEnlistmentTests
         (await store.GetStreamInfoAsync("s1"))!.Version.Should().Be(1);
     }
 
+    [Fact]
+    public async Task An_enlisted_snapshot_commits_with_the_frame_without_self_locking()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+        var snapshots = harness.Services.GetRequiredService<IEventStoreProvider>().GetSnapshotStore("test")!;
+
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+
+            // The append leaves an uncommitted es_streams write; a snapshot saved on a second connection would
+            // lock against it on shared-cache SQLite. Enlisted, both share the one connection — and the snapshot
+            // is visible within the frame (read-your-writes). Bounded so a regression fails fast, not hangs.
+            await store.AppendToStreamAsync("agg-1", ExpectedVersion.NoStream, Events(3));
+            await snapshots.SaveAsync("agg-1", 3, new byte[] { 9 }).WaitAsync(TimeSpan.FromSeconds(10));
+            (await snapshots.LoadLatestAsync("agg-1"))!.StreamVersion.Should().Be(3);
+
+            await unitOfWork.CommitAsync();
+        }
+
+        (await snapshots.LoadLatestAsync("agg-1"))!.StreamVersion.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task An_enlisted_snapshot_rolls_back_with_the_frame()
+    {
+        await using var harness = Harness.Create();
+        var snapshots = harness.Services.GetRequiredService<IEventStoreProvider>().GetSnapshotStore("test")!;
+
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+            await snapshots.SaveAsync("agg-1", 5, new byte[] { 1, 2, 3 });
+            await unitOfWork.RollbackAsync();
+        }
+
+        // A rolled-back frame leaves no snapshot behind. An autonomous snapshot would have committed ahead of a
+        // stream whose append rolled back, wedging the next aggregate load at a version the stream never reaches.
+        (await snapshots.LoadLatestAsync("agg-1")).Should().BeNull("the rolled-back snapshot must not persist");
+    }
+
+    [Fact]
+    public async Task An_enlisted_checkpoint_commits_with_the_frame_without_self_locking()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+        var checkpoints = harness.Services.GetRequiredService<ICheckpointStore>();
+
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+
+            // With an uncommitted append pending on the frame, the checkpoint advance must share the borrowed
+            // connection rather than opening a second one. Bounded so a locking regression fails fast.
+            await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
+            await checkpoints.SetAsync("sub", GlobalPosition.FromSequence(7)).WaitAsync(TimeSpan.FromSeconds(10));
+
+            await unitOfWork.CommitAsync();
+        }
+
+        (await checkpoints.GetAsync("sub")).Should().Be(GlobalPosition.FromSequence(7));
+        (await harness.Store.GetStreamInfoAsync("s1"))!.Version.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_enlisted_checkpoint_rolls_back_with_the_frame()
+    {
+        await using var harness = Harness.Create();
+        var checkpoints = harness.Services.GetRequiredService<ICheckpointStore>();
+
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+            await checkpoints.SetAsync("sub", GlobalPosition.FromSequence(42));
+            (await checkpoints.GetAsync("sub")).Should().Be(GlobalPosition.FromSequence(42)); // read-your-writes
+            await unitOfWork.RollbackAsync();
+        }
+
+        // The checkpoint store now enlists like the event and snapshot stores: a rolled-back frame leaves no
+        // checkpoint behind, so a projection write and its checkpoint advance can commit — or not — as one.
+        (await checkpoints.GetAsync("sub")).Should().BeNull("the rolled-back checkpoint must not persist");
+    }
+
     private static async Task InsertSideRowAsync(DbConnection connection, DbTransaction transaction, string id, string value)
     {
         await using var cmd = connection.CreateCommand();
