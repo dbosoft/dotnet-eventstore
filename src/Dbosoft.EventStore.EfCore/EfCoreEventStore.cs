@@ -6,14 +6,14 @@ using Microsoft.EntityFrameworkCore;
 namespace Dbosoft.EventStore.EfCore;
 
 /// <summary>
-/// The EF Core event store for one domain. It holds no context — every operation opens a fresh
-/// context from the factory and disposes it, so the store is safe to share and never keeps a global
-/// context. Appending is race-free via the unique index on (domain, stream, version): a lost race is
-/// a unique violation, translated to a concurrency conflict. A registration may add a version
-/// concurrency token for tidier conflict detection.
+/// The EF Core event store for one domain. It holds no context — every operation leases one from the
+/// <see cref="EventStoreContextProvider"/> (the caller's borrowed context under a unit-of-work frame, else a
+/// fresh one) and releases it, so the store is safe to share and never keeps a global context. Appending is
+/// race-free via the unique index on (domain, stream, version): a lost race is a unique violation, translated
+/// to a concurrency conflict. A registration may add a version concurrency token for tidier conflict detection.
 /// </summary>
 internal sealed class EfCoreEventStore(
-    IDbContextFactory<EventStoreDbContext> factory,
+    EventStoreContextProvider context,
     string domain,
     TimeProvider timeProvider,
     bool inBandMarkers,
@@ -26,18 +26,6 @@ internal sealed class EfCoreEventStore(
     protected override string NotifyDomain => domain;
 
     public override StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
-
-    // The context to enlist writes onto when a caller's unit of work is ambient, or null to run autonomously.
-    // A frame of a foreign kind is a misconfiguration (only this provider issues frames), so it is rejected
-    // rather than silently ignored — which would quietly break the atomicity the caller asked for.
-    private static EventStoreDbContext? TryGetEnlistedContext() =>
-        AmbientEventStoreUnitOfWork.Current switch
-        {
-            null => null,
-            EfCoreEventStoreUnitOfWork efCore => efCore.Context,
-            _ => throw new InvalidOperationException(
-                "An event store unit of work is active that this EF Core store cannot enlist onto.")
-        };
 
     protected override async Task<AppendResult> AppendToStreamCoreAsync(
         string streamId,
@@ -59,7 +47,7 @@ internal sealed class EfCoreEventStore(
         // Under an ambient unit of work the append joins the caller's transaction and neither retries nor
         // reclassifies in place (a failed save dooms that transaction); a conflict propagates and the whole
         // frame rolls back. Without one, it owns its context and transaction and retries as before.
-        if (TryGetEnlistedContext() is { } enlisted)
+        if (context.Enlisted is { } enlisted)
             return await AppendEnlistedAsync(enlisted, streamId, expectedVersion, events, batchIds, ct)
                 .ConfigureAwait(false);
         return await AppendAutonomousAsync(streamId, expectedVersion, events, batchIds, ct).ConfigureAwait(false);
@@ -80,7 +68,7 @@ internal sealed class EfCoreEventStore(
         // A conflict surfaces as a DbUpdateException and is left to propagate: the caller's frame rolls back
         // and retries as a whole, so there is no in-place reclassification against the frame's own uncommitted
         // (and, after a failed save, doomed) transaction.
-        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        await ctx.SaveEnlistedChangesAsync(ct).ConfigureAwait(false);
         return new AppendResult(outcome.StagedVersion, GlobalPosition.FromSequence(outcome.StagedLastRow!.Position));
     }
 
@@ -97,7 +85,8 @@ internal sealed class EfCoreEventStore(
         const int maxAttempts = 64;
         for (var attempt = 1; ; attempt++)
         {
-            await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+            var ctx = lease.Context;
 
             var outcome = await StageAppendAsync(ctx, streamId, expectedVersion, events, batchIds, ct).ConfigureAwait(false);
             if (outcome.Completed is { } completed)
@@ -112,7 +101,8 @@ internal sealed class EfCoreEventStore(
             {
                 // The save failed. Rather than depend on provider-specific error codes to tell a unique-
                 // index violation from anything else, re-read and classify by the resulting state.
-                await using var check = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+                await using var checkLease = await context.LeaseAsync(ct).ConfigureAwait(false);
+                var check = checkLease.Context;
 
                 // Read the head version before the batch (see StageAppendAsync): committed data is visible to
                 // every later query on the connection, so if the stream has advanced the batch read below is
@@ -272,7 +262,7 @@ internal sealed class EfCoreEventStore(
 
         // Under an ambient unit of work the batch stages onto the caller's transaction and commits with it;
         // otherwise it owns one context and transaction so every stream's rows commit together or not at all.
-        if (TryGetEnlistedContext() is { } enlisted)
+        if (context.Enlisted is { } enlisted)
             return await AppendToStreamsEnlistedAsync(enlisted, appends, ct).ConfigureAwait(false);
         return await AppendToStreamsAutonomousAsync(appends, ct).ConfigureAwait(false);
     }
@@ -282,7 +272,8 @@ internal sealed class EfCoreEventStore(
         CancellationToken ct)
     {
         // One context, one transaction: every stream's rows and head update commit together or not at all.
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+        var ctx = lease.Context;
         await using var tx = await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
 
         var results = new AppendResult[appends.Count];
@@ -363,7 +354,7 @@ internal sealed class EfCoreEventStore(
         // A conflict propagates (the frame rolls back and the caller retries as a whole); there is no in-place
         // reconciliation against the frame's own uncommitted, and after a failed save doomed, transaction.
         if (anyStaged)
-            await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+            await ctx.SaveEnlistedChangesAsync(ct).ConfigureAwait(false);
 
         return BuildMultiAppendResults(appends, results, stagedLastRow, stagedVersion);
     }
@@ -402,7 +393,8 @@ internal sealed class EfCoreEventStore(
     private async Task<IReadOnlyList<AppendResult>?> ReconcileMultiAppendAsync(
         IReadOnlyList<StreamAppend> appends, long[] preVersions, CancellationToken ct)
     {
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+        var ctx = lease.Context;
 
         var actualVersions = new long[appends.Count];
         var hardDeleted = new bool[appends.Count];
@@ -480,20 +472,6 @@ internal sealed class EfCoreEventStore(
         expectedVersion == ExpectedVersion.Any
         || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);
 
-    // Runs work against the enlisted context when a frame is ambient — so a read within the frame sees the
-    // frame's own (already-saved but uncommitted) writes, and any write joins the borrowed transaction, both
-    // sharing the one borrowed connection rather than opening a second one. On a single-writer store (SQLite
-    // shared cache) that second connection would block on the frame's pending write and self-lock; here it
-    // cannot, because both run on the same connection and transaction. The enlisted context is the frame's, so
-    // it is never disposed here. Without a frame the work owns a fresh context and connection, as before.
-    private async Task<T> ExecuteOnContextAsync<T>(Func<EventStoreDbContext, Task<T>> work, CancellationToken ct)
-    {
-        if (TryGetEnlistedContext() is { } enlisted)
-            return await work(enlisted).ConfigureAwait(false);
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        return await work(ctx).ConfigureAwait(false);
-    }
-
     private IQueryable<EventRow> StreamQuery(
         EventStoreDbContext ctx, string streamId, ReadDirection direction, long fromVersion, long maxCount)
     {
@@ -528,13 +506,15 @@ internal sealed class EfCoreEventStore(
         // As an iterator, this body runs at enumeration time, so the frame is captured when the caller starts
         // reading, not when the method is called — read the enumerable, not the call site, for which frame it
         // joins. The common "await foreach immediately" makes the two coincide.
-        if (TryGetEnlistedContext() is { } enlisted)
+        await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+        var query = StreamQuery(lease.Context, streamId, direction, fromVersion, maxCount);
+
+        if (lease.Shared)
         {
-            // Materialize on the borrowed connection before yielding: the frame's single connection must stay
-            // free for the caller's next write, and a data reader held open across yields would block it. The
-            // in-memory loop then observes cancellation per item, since the buffering read already ran.
-            foreach (var row in await StreamQuery(enlisted, streamId, direction, fromVersion, maxCount)
-                         .ToListAsync(ct).ConfigureAwait(false))
+            // On the frame's shared connection, materialize before yielding: it must stay free for the caller's
+            // next write, and a data reader held open across yields would block it. The in-memory loop then
+            // observes cancellation per item, since the buffering read already ran.
+            foreach (var row in await query.ToListAsync(ct).ConfigureAwait(false))
             {
                 ct.ThrowIfCancellationRequested();
                 yield return ToStored(row);
@@ -542,14 +522,12 @@ internal sealed class EfCoreEventStore(
             yield break;
         }
 
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        await foreach (var row in StreamQuery(ctx, streamId, direction, fromVersion, maxCount)
-                           .AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
+        await foreach (var row in query.AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
             yield return ToStored(row);
     }
 
     public override Task<StreamInfo?> GetStreamInfoAsync(string streamId, CancellationToken ct = default) =>
-        ExecuteOnContextAsync<StreamInfo?>(async ctx =>
+        context.ExecuteAsync<StreamInfo?>(async ctx =>
         {
             var head = await ctx.Streams.AsNoTracking()
                 .FirstOrDefaultAsync(s => s.Domain == domain && s.StreamId == streamId, ct).ConfigureAwait(false);
@@ -560,7 +538,7 @@ internal sealed class EfCoreEventStore(
         }, ct);
 
     public Task<StreamMetadata?> GetStreamMetadataAsync(string streamId, CancellationToken ct = default) =>
-        ExecuteOnContextAsync<StreamMetadata?>(async ctx =>
+        context.ExecuteAsync<StreamMetadata?>(async ctx =>
         {
             var json = await ctx.Streams.AsNoTracking()
                 .Where(s => s.Domain == domain && s.StreamId == streamId && !s.HardDeleted)
@@ -578,14 +556,15 @@ internal sealed class EfCoreEventStore(
 
         // Under a frame, write on the borrowed context: a concurrent-create race cannot be recovered in place
         // (a failed save dooms that transaction), so it propagates and the caller retries the whole frame.
-        if (TryGetEnlistedContext() is { } enlisted)
+        if (context.Enlisted is { } enlisted)
         {
             await WriteStreamMetadataAsync(enlisted, streamId, json, recoverFromConcurrentCreate: false, ct)
                 .ConfigureAwait(false);
             return;
         }
 
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+        await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+        var ctx = lease.Context;
         await WriteStreamMetadataAsync(ctx, streamId, json, recoverFromConcurrentCreate: true, ct).ConfigureAwait(false);
     }
 
@@ -609,10 +588,14 @@ internal sealed class EfCoreEventStore(
                 await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 return;
             }
-            catch (Exception ex) when (recoverFromConcurrentCreate && ex is DbUpdateException or DbUpdateConcurrencyException)
+            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException)
             {
-                // A concurrent writer created the head first; fall through to update its metadata column.
+                // The insert lost a concurrent-create race; either way the failed row must not stay staged.
+                // Autonomously fall through to update the winner's metadata column; enlisted let the conflict
+                // propagate to doom the frame — with nothing left to re-flush on the shared context.
                 ctx.ChangeTracker.Clear();
+                if (!recoverFromConcurrentCreate)
+                    throw;
             }
         }
 
@@ -629,11 +612,14 @@ internal sealed class EfCoreEventStore(
         long maxCount = long.MaxValue,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        // Frame captured at enumeration time, and materialize-before-yield inside a frame — see ReadStreamAsync.
-        if (TryGetEnlistedContext() is { } enlisted)
+        // Frame captured at enumeration time, and materialize-before-yield on the shared connection — see
+        // ReadStreamAsync.
+        await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+        var query = AllQuery(lease.Context, from, direction, maxCount);
+
+        if (lease.Shared)
         {
-            foreach (var row in await AllQuery(enlisted, from, direction, maxCount)
-                         .ToListAsync(ct).ConfigureAwait(false))
+            foreach (var row in await query.ToListAsync(ct).ConfigureAwait(false))
             {
                 ct.ThrowIfCancellationRequested();
                 yield return ToStored(row);
@@ -641,14 +627,12 @@ internal sealed class EfCoreEventStore(
             yield break;
         }
 
-        await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-        await foreach (var row in AllQuery(ctx, from, direction, maxCount)
-                           .AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
+        await foreach (var row in query.AsAsyncEnumerable().WithCancellation(ct).ConfigureAwait(false))
             yield return ToStored(row);
     }
 
     public Task<GlobalPosition> FindPositionAtAsync(DateTimeOffset timestamp, CancellationToken ct = default) =>
-        ExecuteOnContextAsync(async ctx =>
+        context.ExecuteAsync(async ctx =>
         {
             var before = await ctx.Events.AsNoTracking()
                 .Where(e => e.Domain == domain && e.CreatedAt < timestamp)
@@ -752,7 +736,7 @@ internal sealed class EfCoreEventStore(
         // The tombstone prune (a write) and retention planning (reads) run on the enlisted context under a
         // frame, so a scavenge invoked inside a caller's unit of work joins its transaction rather than opening
         // a second connection that would self-lock against the frame's pending writes on a single-writer store.
-        var (removed, streams, plan) = await ExecuteOnContextAsync(async ctx =>
+        var (removed, streams, plan) = await context.ExecuteAsync(async ctx =>
         {
             var cutoff = timeProvider.GetUtcNow() - tombstoneRetention;
             long removedCount = await ctx.Events
@@ -800,9 +784,10 @@ internal sealed class EfCoreEventStore(
             return (removedCount, streamCount, retentionPlan);
         }, ct).ConfigureAwait(false);
 
-        // Force-truncate outside the query context; each call opens its own transaction and emits the
-        // retention truncation's marker so read models learn to forget. A stream deleted between planning
-        // and truncating is skipped, so one race does not sink the whole pass.
+        // Force-truncate outside the planning block; autonomously each call opens its own transaction, while
+        // under a frame they all join the borrowed one. Each emits the retention truncation's marker so read
+        // models learn to forget. A stream deleted between planning and truncating is skipped, so one race
+        // does not sink the whole pass.
         foreach (var (streamId, boundary) in plan)
         {
             try
@@ -829,13 +814,13 @@ internal sealed class EfCoreEventStore(
         bool transactional,
         CancellationToken ct)
     {
-        if (TryGetEnlistedContext() is { } enlisted)
+        if (context.Enlisted is { } enlisted)
         {
             // Enlisted: the frame supplies the transaction, so the transactional flag is moot, nothing commits
             // here, and a conflict propagates to roll the whole frame back rather than retrying in place.
             if (!await operation(enlisted, ct).ConfigureAwait(false))
                 return;
-            await enlisted.SaveChangesAsync(ct).ConfigureAwait(false);
+            await enlisted.SaveEnlistedChangesAsync(ct).ConfigureAwait(false);
             NotifyChanged(streamId);
             return;
         }
@@ -846,7 +831,8 @@ internal sealed class EfCoreEventStore(
         const int maxAttempts = 32;
         for (var attempt = 1; ; attempt++)
         {
-            await using var ctx = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using var lease = await context.LeaseAsync(ct).ConfigureAwait(false);
+            var ctx = lease.Context;
             await using var tx = transactional
                 ? await ctx.Database.BeginTransactionAsync(ct).ConfigureAwait(false)
                 : null;

@@ -46,7 +46,8 @@ public static class EfCoreEventStoreBuilderExtensions
             sp.GetServices<RegisteredDomain>(),
             sp.GetRequiredService<TimeProvider>(),
             sp.GetService<IChangeNotifier>())); // optional — only wired when notifications are registered
-        builder.Services.TryAddSingleton<ICheckpointStore, EfCoreCheckpointStore>();
+        builder.Services.TryAddSingleton<ICheckpointStore>(sp => new EfCoreCheckpointStore(
+            new EventStoreContextProvider(sp.GetRequiredService<IDbContextFactory<EventStoreDbContext>>())));
 
         // Enlistment is opt-in: only when the registration can rebind its dialect onto a borrowed connection
         // do we expose a unit-of-work factory. Its presence in the container is the "can enlist" capability.
