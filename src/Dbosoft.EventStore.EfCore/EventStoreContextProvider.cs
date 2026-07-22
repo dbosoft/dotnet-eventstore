@@ -13,9 +13,10 @@ namespace Dbosoft.EventStore.EfCore;
 internal sealed class EventStoreContextProvider(IDbContextFactory<EventStoreDbContext> factory)
 {
     /// <summary>
-    /// The ambient frame's context, or null when running autonomously. A frame of a foreign kind is a
-    /// misconfiguration (only this provider issues frames), so it is rejected rather than silently ignored —
-    /// which would quietly break the atomicity the caller asked for.
+    /// The ambient frame's context, or null when running autonomously. Only an
+    /// <see cref="EfCoreEventStoreUnitOfWork"/> frame — issued by this EF Core provider's unit-of-work
+    /// factory — can be enlisted onto; a frame of any other kind is a misconfiguration and is rejected rather
+    /// than silently ignored, which would quietly break the atomicity the caller asked for.
     /// </summary>
     public EventStoreDbContext? Enlisted =>
         AmbientEventStoreUnitOfWork.Current switch
