@@ -588,13 +588,13 @@ internal sealed class EfCoreEventStore(
                 await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 return;
             }
-            catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException)
+            catch (Exception ex)
             {
-                // The insert lost a concurrent-create race; either way the failed row must not stay staged.
-                // Autonomously fall through to update the winner's metadata column; enlisted let the conflict
-                // propagate to doom the frame — with nothing left to re-flush on the shared context.
+                // Whatever failed the save, the staged row must not stay tracked — on the shared context a
+                // later save would re-flush it. Only the autonomous path recovers from a lost concurrent-create
+                // race by falling through to update the winner's metadata column; everything else propagates.
                 ctx.ChangeTracker.Clear();
-                if (!recoverFromConcurrentCreate)
+                if (!recoverFromConcurrentCreate || ex is not (DbUpdateException or DbUpdateConcurrencyException))
                     throw;
             }
         }
