@@ -43,12 +43,14 @@ public sealed class PostgreSqlSubscriptionTests(PostgreSqlContainerFixture conta
             await other;
             await Task.Delay(TimeSpan.FromSeconds(2));
             // The subscription reads on its own, as it does beside the messages, not through this transaction.
+            // A reader that waits for the open row is let go by the commit.
             Task<int> pump;
             using (ExecutionContext.SuppressFlow())
                 pump = Task.Run(() => subscription.PumpAsync());
-            await pump;
+            await Task.WhenAny(pump, Task.Delay(TimeSpan.FromSeconds(3)));
 
             await unitOfWork.CommitAsync();
+            await pump;
         }
         await Task.Delay(TimeSpan.FromSeconds(2));
         await subscription.PumpAsync();
