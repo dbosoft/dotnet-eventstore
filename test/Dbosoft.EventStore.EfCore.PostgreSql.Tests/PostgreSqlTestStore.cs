@@ -15,6 +15,10 @@ internal sealed class PostgreSqlTestStore : IAsyncDisposable
 
     public IEventStoreProvider Provider { get; private set; } = null!;
 
+    public string ConnectionString { get; private set; } = "";
+
+    public IEventStoreUnitOfWorkFactory UnitOfWorks => _services.GetRequiredService<IEventStoreUnitOfWorkFactory>();
+
     public static async Task<PostgreSqlTestStore> CreateAsync(string adminConnectionString)
     {
         var connectionString = await CreateDatabaseAsync(adminConnectionString);
@@ -22,7 +26,7 @@ internal sealed class PostgreSqlTestStore : IAsyncDisposable
         var services = new ServiceCollection();
         services.AddEventStore(es => es.UseNpgsql(connectionString).AddDomain("test", _ => { }));
 
-        var store = new PostgreSqlTestStore { _services = services.BuildServiceProvider() };
+        var store = new PostgreSqlTestStore { _services = services.BuildServiceProvider(), ConnectionString = connectionString };
         await using (var ctx = await store._services.GetRequiredService<IDbContextFactory<EventStoreDbContext>>().CreateDbContextAsync())
             await ctx.Database.EnsureCreatedAsync();
 
