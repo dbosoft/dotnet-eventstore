@@ -58,6 +58,62 @@ public sealed class PostgreSqlSubscriptionTests(PostgreSqlContainerFixture conta
         delivered.Should().BeEquivalentTo(["late", "early"]);
     }
 
+    [Fact]
+    public async Task Concurrent_long_transactions_and_a_running_subscription_lose_and_repeat_nothing()
+    {
+        // Every earlier test of the collection keeps a pool of idle connections to its own database in the
+        // shared container; these writers need connections of their own beyond them.
+        NpgsqlConnection.ClearAllPools();
+        await using var testStore = await PostgreSqlTestStore.CreateAsync(container.ConnectionString);
+        var store = testStore.Provider.GetStore("test");
+        var delivered = new List<Guid>();
+        var subscription = new EventStoreSubscription(store, new Checkpoints(), "sub", (e, _) =>
+        {
+            lock (delivered)
+                delivered.Add(e.EventId);
+            return Task.CompletedTask;
+        });
+
+        const int writers = 6;
+        var appended = new List<Guid>();
+        var writing = Enumerable.Range(0, writers).Select(i => Task.Run(async () =>
+        {
+            for (var round = 0; round < 3; round++)
+            {
+                var events = Events(2);
+                await using var conn = new NpgsqlConnection(testStore.ConnectionString);
+                await conn.OpenAsync();
+                await using var tx = await conn.BeginTransactionAsync();
+                await using var unitOfWork = testStore.UnitOfWorks.Enlist(conn, tx);
+                await store.AppendToStreamAsync($"w{i}-{round}", ExpectedVersion.NoStream, events);
+                // Held open for different lengths, so commits land in another order than the inserts.
+                await Task.Delay(Random.Shared.Next(0, 400));
+                await unitOfWork.CommitAsync();
+                lock (appended)
+                    appended.AddRange(events.Select(e => e.EventId));
+            }
+        })).ToList();
+
+        using var stop = new CancellationTokenSource();
+        Task pumping;
+        using (ExecutionContext.SuppressFlow())
+            pumping = Task.Run(async () =>
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    await subscription.PumpAsync();
+                    await Task.Delay(20);
+                }
+            });
+
+        await Task.WhenAll(writing);
+        await stop.CancelAsync();
+        await pumping;
+        await subscription.PumpAsync();
+
+        delivered.Should().OnlyHaveUniqueItems().And.BeEquivalentTo(appended);
+    }
+
     private sealed class Checkpoints : ICheckpointStore
     {
         private readonly Dictionary<string, GlobalPosition> _saved = new();

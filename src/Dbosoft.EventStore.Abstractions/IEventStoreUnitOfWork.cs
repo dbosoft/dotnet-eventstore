@@ -34,11 +34,21 @@ public interface IEventStoreUnitOfWork : IAsyncDisposable
     void OnCommitted(Func<CancellationToken, ValueTask> callback);
 
     /// <summary>
-    /// Commits the borrowed transaction, making every enlisted write durable together, then runs the
-    /// <see cref="OnCommitted"/> callbacks. Use when the frame owns the commit — a standalone unit of work.
-    /// When the transaction is committed by its owner instead (for example a Rebus message unit of work),
-    /// leave the commit to the owner and call <see cref="CompleteAsync"/>. After this the frame is no longer
-    /// active.
+    /// Readies the frame's writes for the commit of the borrowed transaction. A store that orders its events
+    /// by commit takes their global positions here and keeps them reserved until the transaction ends, so call
+    /// it as the last step before the owner commits — after every write of the unit, with nothing slow in
+    /// between. <see cref="CommitAsync"/> calls it itself; an owner that commits the transaction itself must call
+    /// it first, or the store reports the commit as incomplete in <see cref="CompleteAsync"/>. Calling it again
+    /// readies only what was written since.
+    /// </summary>
+    ValueTask PrepareAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Prepares (see <see cref="PrepareAsync"/>) and commits the borrowed transaction, making every enlisted
+    /// write durable together, then runs the <see cref="OnCommitted"/> callbacks. Use when the frame owns the
+    /// commit — a standalone unit of work. When the transaction is committed by its owner instead (for example
+    /// a Rebus message unit of work), the owner calls <see cref="PrepareAsync"/>, commits, and then calls
+    /// <see cref="CompleteAsync"/>. After this the frame is no longer active.
     /// </summary>
     ValueTask CommitAsync(CancellationToken ct = default);
 
@@ -46,6 +56,9 @@ public interface IEventStoreUnitOfWork : IAsyncDisposable
     /// Runs the deferred <see cref="OnCommitted"/> callbacks and ends the frame, for when the borrowed
     /// transaction has already been committed by its owner (a Rebus message unit of work, say) rather than by
     /// <see cref="CommitAsync"/>. Does not touch the transaction. After this the frame is no longer active.
+    /// Throws <see cref="InvalidOperationException"/> after running the callbacks when the owner committed writes
+    /// that were never prepared (see <see cref="PrepareAsync"/>): they are durable but a store that orders by
+    /// commit cannot place them, which must not pass unnoticed.
     /// </summary>
     ValueTask CompleteAsync(CancellationToken ct = default);
 

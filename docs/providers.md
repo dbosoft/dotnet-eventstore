@@ -129,13 +129,14 @@ public enum StoreCapabilities
 | `IStreamMetadataStore` (retention) | ✅ | ✅ | ✅ |
 | `IMultiStreamAppend` (atomic multi-stream) | ✅ | ✅ | — |
 | `IEnlistableStore` (transactional enlistment) | — | ✅ | — |
-| `StoreCapabilities.ExactCatchup` | ✅ | — | — |
+| `StoreCapabilities.ExactCatchup` | ✅ | ✅ | — |
 | `StoreCapabilities.SnapshotHistory` | ✅ | ✅ | ✅ |
 
 The in-memory store implements every capability and is the reference the [conformance suite](bus-and-modules.md#testing)
-runs against. EF Core and Azure Tables do not declare `ExactCatchup` because their `$all` positions are
-assigned before commit, so a catch-up read is complete only up to a bounded staleness window — the
-subscription handles that for you (see [completeness](reading-and-subscriptions.md#completeness-and-exactcatchup)).
+runs against. EF Core orders `$all` by a commit sequence taken just before each commit, so it declares
+`ExactCatchup`; Azure Tables assigns `$all` positions before commit, so a catch-up read there is complete only up
+to a bounded staleness window — the subscription handles that for you (see
+[completeness](reading-and-subscriptions.md#completeness-and-exactcatchup)).
 Azure Tables cannot do a cross-partition atomic append, so it does not offer `IMultiStreamAppend`.
 
 Every provider passes the same conformance suite; a provider only runs the tests for what it declares.
@@ -165,7 +166,7 @@ await using (var unitOfWork = unitOfWorkFactory.Enlist(connection, tx.GetDbTrans
 {
     await store.AppendToStreamAsync("order-42", expectedVersion, events); // enlists — stages, does not commit
     await myStateContext.SaveChangesAsync();                              // the consumer's own writes
-    await unitOfWork.CommitAsync();  // commits both, then fires the deferred change signals
+    await unitOfWork.CommitAsync();  // takes the events' commit sequence, commits both, then fires the change signals
 }
 ```
 
@@ -178,9 +179,14 @@ the autonomous one, by necessity:
   store error) propagates, and the caller rolls the whole frame back and retries. The retry boundary moves up
   to the caller (or, under Rebus, to message retry).
 - Its **change signal is deferred** to `CommitAsync`, so a reader never wakes on events a rollback discards.
-- **Snapshot and checkpoint writes are not enlisted** — they stay autonomous, appropriate for derived data.
-- Reads (`ReadStreamAsync`, `GetStreamInfoAsync`, …) stay autonomous too, so within an open frame they see
-  only committed data, not the frame's own uncommitted writes.
+- Its **`$all` position is taken at commit**: the append returns `AppendResult.Position == null`, and an event
+  read back inside the frame stands at `GlobalPosition.Start`. When the caller commits the transaction itself
+  (rather than through `CommitAsync`), it calls `unitOfWork.PrepareAsync()` as the very last step before its
+  commit and `CompleteAsync()` after it; a commit without `PrepareAsync` leaves the events out of `$all`, and
+  `CompleteAsync` throws to say so. Nothing slow belongs between `PrepareAsync` and the commit: from there to the
+  commit, other committing writers wait.
+- Snapshot writes and reads run on the frame's connection, so a read inside the frame sees the frame's own
+  uncommitted writes.
 
 A `NonRetryingExecutionStrategy` is forced on the enlisted context even when the app enabled
 `EnableRetryOnFailure`, because a retrying strategy refuses a user-initiated transaction.

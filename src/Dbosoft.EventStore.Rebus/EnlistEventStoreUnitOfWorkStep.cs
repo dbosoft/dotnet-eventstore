@@ -37,6 +37,11 @@ internal sealed class EnlistEventStoreUnitOfWorkStep(
         transactionContext.OnDisposed(_ => FireAndForgetDispose(unitOfWork));
 
         await next().ConfigureAwait(false);
+
+        // The message's unit of work shared the transaction before this step ran, so it commits only after this
+        // step returns: preparing here is the last thing before that commit, and holds the store's commit order
+        // for no longer than the owner's own flush and commit.
+        await unitOfWork.PrepareAsync().ConfigureAwait(false);
     }
 
     // OnDisposed is synchronous and runs after the message has committed or failed, so releasing the frame's

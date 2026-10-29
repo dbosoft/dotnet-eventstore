@@ -64,8 +64,11 @@ the ambient frame, on the event store — both **on the same open connection ins
 shared connection *string* is not enough; that is two connections and two transactions, hence no atomicity).
 The store's appends stage into that transaction. When the message succeeds, the **message's** unit of work
 commits — that one commit makes both the app's state and the events durable together. The store does not
-commit or roll back itself; it only fires its deferred change signals once the transaction has committed (and
-drops them untouched if the message failed). A message whose resolver returns `null` runs with no frame.
+commit or roll back itself. After the handler returns it prepares the frame — takes the events' `$all` commit
+sequence, which holds other committing writers until this commit — and it fires its deferred change signals
+once the transaction has committed (and drops them untouched if the message failed). This relies on the
+message's unit of work sharing the transaction before the step runs and committing after it returns, which it
+must anyway for the step to find the transaction. A message whose resolver returns `null` runs with no frame.
 
 ## Modular hosting with Hosuto
 

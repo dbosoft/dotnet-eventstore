@@ -103,13 +103,23 @@ Whether a catch-up read is **complete** depends on the provider, and is the `Exa
 On the in-memory store, appends are serialized under one lock, so its `$all` is dense and gap-free — it
 declares `ExactCatchup`, and the subscription simply forwards each event and advances the checkpoint.
 
-On EF Core and Azure Tables, a global position is assigned before the commit that makes an event visible, so a
-naive forward read could skip an event that commits *below* a position it has already passed. Those providers
-do **not** declare `ExactCatchup`. The subscription closes the gap with a **safety window**: it does not
-deliver or checkpoint past an event newer than `SafetyWindow`, so a not-yet-committed lower sibling is never
-skipped — completeness holds provided no append stays uncommitted longer than the window (the price is that
-much delivery latency). De-duplication by `EventId` over a bounded window makes the overlapping re-reads
-idempotent.
+On EF Core, an event's `$all` position is its **commit sequence**, taken as the last step before its
+transaction commits, from one counter row whose lock the transaction keeps until the commit. The next
+transaction takes its numbers only after this one is visible, so sequence order is commit order and a forward
+read never passes an event that commits later — however long the transaction stays open, which matters when an
+append is [enlisted](providers.md#transactional-enlistment) in a caller's transaction that goes on to do other
+work. EF Core declares `ExactCatchup`. The lock is held only from that last step to the commit; a rollback rolls
+the counter back with it.
+
+On Azure Tables, a global position is assigned before the commit that makes an event visible, so a naive
+forward read could skip an event that commits *below* a position it has already passed. It does **not** declare
+`ExactCatchup`. The subscription closes the gap with a **safety window**: it does not deliver or checkpoint past
+an event newer than `SafetyWindow`, so a not-yet-committed lower sibling is never skipped — completeness holds
+provided no append stays uncommitted longer than the window (the price is that much delivery latency).
+
+On every store, the checkpoint advances at the end of a pump, so after a handler throws the next pump reads
+the events before it again; de-duplication by `EventId` over a bounded window keeps them from reaching the
+handler twice in the same process.
 
 Tune it through `SubscriptionOptions`:
 
@@ -125,7 +135,7 @@ new SubscriptionOptions
 }
 ```
 
-A smaller safety window keeps latency low but leaves less margin for a slow commit; size it for your worst-case
-commit latency under load. If your read model is a per-stream fold rather than a globally-ordered projection,
+On a store without `ExactCatchup`, a smaller safety window keeps latency low but leaves less margin for a slow
+commit; size it for your worst-case commit latency under load. An exact store ignores it. If your read model is a per-stream fold rather than a globally-ordered projection,
 you often do not need the ordered catch-up at all — see
 [Read models & change notifications](read-models-and-notifications.md).

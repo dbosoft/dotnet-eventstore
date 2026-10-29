@@ -105,9 +105,9 @@ public sealed class EfCoreEnlistmentTests
     [Fact]
     public async Task An_externally_committed_transaction_is_completed_and_signals_only_after_the_commit()
     {
-        // The Rebus flow: the message's unit of work owns the commit; the frame does not commit, it only
-        // fires its deferred signals afterwards via CompleteAsync. Here the transaction is committed directly,
-        // standing in for that owner.
+        // The Rebus flow: the message's unit of work owns the commit; the frame does not commit, it prepares
+        // right before and fires its deferred signals afterwards via CompleteAsync. Here the transaction is
+        // committed directly, standing in for that owner.
         await using var harness = Harness.Create();
         var store = harness.Store;
         using var watch = harness.Notifier.Watch("test");
@@ -120,6 +120,7 @@ public sealed class EfCoreEnlistmentTests
             await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(1));
             await InsertSideRowAsync(conn, tx, "k", "v");
 
+            await unitOfWork.PrepareAsync();
             await tx.CommitAsync();
             signal.IsCompleted.Should().BeFalse("signals fire only when the frame is completed after the commit");
 
@@ -129,6 +130,50 @@ public sealed class EfCoreEnlistmentTests
         (await signal.WaitAsync(TimeSpan.FromSeconds(2))).Should().Be("s1");
         (await store.GetStreamInfoAsync("s1"))!.Version.Should().Be(1);
         (await harness.ReadSideValueAsync("k")).Should().Be("v");
+    }
+
+    [Fact]
+    public async Task An_owner_that_commits_without_preparing_is_told_and_the_events_stay_out_of_all()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+        Func<Task> complete;
+
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+            await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(2));
+            await tx.CommitAsync();
+            complete = () => unitOfWork.CompleteAsync().AsTask();
+            await complete.Should().ThrowAsync<InvalidOperationException>().WithMessage("*2 event(s)*PrepareAsync*");
+        }
+
+        (await store.GetStreamInfoAsync("s1"))!.Version.Should().Be(2, "the commit itself went through");
+        (await ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).ToListAsync()).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_enlisted_append_takes_its_position_at_commit_in_commit_order()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+        await store.AppendToStreamAsync("before", ExpectedVersion.NoStream, Events(1));
+
+        AppendResult enlisted;
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+            enlisted = await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(2));
+            await unitOfWork.CommitAsync();
+        }
+        await store.AppendToStreamAsync("after", ExpectedVersion.NoStream, Events(1));
+
+        enlisted.Position.Should().BeNull("an enlisted append learns its position only when its frame commits");
+        var all = await ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).ToListAsync();
+        all.Select(e => e.StreamId).Should().Equal("before", "s1", "s1", "after");
+        all.Select(e => e.Position).Should().BeInAscendingOrder().And.OnlyHaveUniqueItems();
     }
 
     [Fact]
@@ -263,8 +308,9 @@ public sealed class EfCoreEnlistmentTests
         // The enlisted streaming read materializes up front, so it holds no open data reader on the borrowed
         // connection. Positioned mid-enumeration, a write on that same connection must therefore succeed rather
         // than fail with "a data reader is already open" — the reason the enlisted path buffers before yielding.
+        // A stream read shows the frame's own events; $all would not, as they have no commit sequence yet.
         var seen = 0;
-        await using (var e = ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).GetAsyncEnumerator())
+        await using (var e = store.ReadStreamAsync("s1").GetAsyncEnumerator())
         {
             (await e.MoveNextAsync()).Should().BeTrue();
             seen++;

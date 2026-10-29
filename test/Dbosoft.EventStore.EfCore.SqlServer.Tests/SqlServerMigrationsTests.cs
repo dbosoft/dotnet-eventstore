@@ -29,7 +29,8 @@ public sealed class SqlServerMigrationsTests(SqlServerContainerFixture container
         {
             await ctx.Database.MigrateAsync();
             ctx.Database.HasPendingModelChanges().Should().BeFalse();
-            (await ctx.Database.GetAppliedMigrationsAsync()).Should().ContainSingle().Which.Should().EndWith("InitialCreate");
+            (await ctx.Database.GetAppliedMigrationsAsync()).Select(m => m[(m.IndexOf('_') + 1)..])
+                .Should().Equal("InitialCreate", "CommitSequence");
         }
 
         (await TableExistsAsync(connectionString, "es_migrations_history")).Should().BeTrue();

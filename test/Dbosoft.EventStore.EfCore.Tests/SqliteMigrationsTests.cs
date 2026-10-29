@@ -3,6 +3,8 @@ using Dbosoft.EventStore.DependencyInjection;
 using Dbosoft.EventStore.EfCore.Sqlite;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using static Dbosoft.EventStore.Testing.ConformanceHelpers;
@@ -27,7 +29,8 @@ public sealed class SqliteMigrationsTests
             // The migrations are in sync with the model — the drift guard.
             ctx.Database.HasPendingModelChanges().Should().BeFalse();
             // EF recorded the applied migration in (and read it back from) the configured history table.
-            (await ctx.Database.GetAppliedMigrationsAsync()).Should().ContainSingle().Which.Should().EndWith("InitialCreate");
+            (await ctx.Database.GetAppliedMigrationsAsync()).Select(m => m[(m.IndexOf('_') + 1)..])
+                .Should().Equal("InitialCreate", "CommitSequence");
         }
 
         // The history table carries the store's isolated default name, not EF's __EFMigrationsHistory.
@@ -38,6 +41,40 @@ public sealed class SqliteMigrationsTests
         var store = harness.Store;
         await store.AppendToStreamAsync("s1", ExpectedVersion.NoStream, Events(2));
         (await store.GetStreamInfoAsync("s1"))!.Version.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Events_stored_before_the_commit_sequence_keep_their_order_and_new_ones_follow()
+    {
+        await using var harness = Harness.Create();
+
+        await using (var ctx = await harness.CreateContextAsync())
+        {
+            var migrator = ctx.GetService<IMigrator>();
+            var initial = ctx.Database.GetMigrations().First(m => m.EndsWith("_InitialCreate", StringComparison.Ordinal));
+            await migrator.MigrateAsync(initial);
+
+            // Two events as the store wrote them before commit sequences, ordered by row id only.
+            await ctx.Database.ExecuteSqlRawAsync(
+                "INSERT INTO es_streams (Domain, StreamId, Version, TruncatedBefore, IsDeleted, HardDeleted) VALUES ('test', 'old', 2, 1, 0, 0)");
+            for (var version = 1; version <= 2; version++)
+            {
+                await ctx.Database.ExecuteSqlRawAsync(
+                    "INSERT INTO es_events (Domain, StreamId, StreamVersion, EventId, EventType, Data, ContentType, CreatedAt) "
+                    + "VALUES ('test', 'old', {0}, {1}, 'Old', X'7B7D', 'application/json', 0)",
+                    version, Guid.NewGuid().ToString().ToUpperInvariant());
+            }
+
+            await migrator.MigrateAsync();
+        }
+
+        var store = harness.Store;
+        await store.AppendToStreamAsync("new", ExpectedVersion.NoStream, Events(1));
+
+        var all = await ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).ToListAsync();
+        all.Select(e => e.StreamId).Should().Equal("old", "old", "new");
+        all.Select(e => e.Position).Should().Equal(
+            GlobalPosition.FromSequence(1), GlobalPosition.FromSequence(2), GlobalPosition.FromSequence(3));
     }
 
     [Fact]
