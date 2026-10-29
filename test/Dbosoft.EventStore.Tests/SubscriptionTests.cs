@@ -45,14 +45,15 @@ public sealed class SubscriptionTests
     }
 
     [Fact]
-    public async Task Forwards_re_delivered_events_on_an_exact_catchup_store()
+    public async Task De_duplicates_re_delivered_events_on_an_exact_catchup_store_too()
     {
         var store = new ScriptedStore(StoreCapabilities.ExactCatchup) { Script = ScriptedEvents(3) };
         var count = await CountDispatchedOverTwoPumps(store);
 
-        // An exact-catch-up store never re-surfaces an event, so the subscription does not de-duplicate;
-        // the scripted re-delivery is therefore passed straight through — the branch is observable.
-        count.Should().Be(6);
+        // An exact store re-surfaces no event on its own, but the pump after a throwing handler reads the
+        // events before it again (the checkpoint advances only at the end of a pump); those must not reach
+        // the handler twice either.
+        count.Should().Be(3);
     }
 
     [Fact]

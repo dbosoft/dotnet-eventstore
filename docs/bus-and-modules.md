@@ -64,8 +64,21 @@ the ambient frame, on the event store — both **on the same open connection ins
 shared connection *string* is not enough; that is two connections and two transactions, hence no atomicity).
 The store's appends stage into that transaction. When the message succeeds, the **message's** unit of work
 commits — that one commit makes both the app's state and the events durable together. The store does not
-commit or roll back itself; it only fires its deferred change signals once the transaction has committed (and
-drops them untouched if the message failed). A message whose resolver returns `null` runs with no frame.
+commit or roll back itself. The message's unit of work calls `transactionContext.PrepareEventStoreAsync()` as its
+last step before the commit, after flushing its own writes: that takes the events' `$all` commit sequence, which
+holds other committing writers of the store until this commit. A commit without it leaves the events out of
+`$all`, and the frame says so when the message is acknowledged. The frame fires its deferred change signals once
+the transaction has committed (and drops them untouched if the message failed). A message whose resolver returns
+`null` runs with no frame.
+
+```csharp
+public async Task Commit()
+{
+    await stateContext.SaveChangesAsync();                       // the app's own writes first
+    await messageContext.TransactionContext.PrepareEventStoreAsync();
+    await transaction.CommitAsync();
+}
+```
 
 ## Modular hosting with Hosuto
 

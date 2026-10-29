@@ -38,6 +38,66 @@ public sealed class EventStoreDbContext : DbContext
     internal DbSet<EventRow> Events => Set<EventRow>();
     internal DbSet<SnapshotRow> Snapshots => Set<SnapshotRow>();
     internal DbSet<CheckpointRow> Checkpoints => Set<CheckpointRow>();
+    internal DbSet<SequenceRow> Sequence => Set<SequenceRow>();
+
+    /// <summary>The id of the one counter row.</summary>
+    internal const int SequenceId = 1;
+
+    // Event rows this context inserted that have no commit sequence yet, in insert order. Collected on save, so
+    // every insert — an append, a maintenance marker — is sequenced without each writer having to remember it.
+    private readonly List<EventRow> _unsequenced = [];
+    private readonly HashSet<EventRow> _awaiting = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Event rows this context has inserted and not yet given a commit sequence, in insert order.</summary>
+    internal IReadOnlyList<EventRow> Unsequenced => _unsequenced;
+
+    /// <summary>Drops the rows waiting for a sequence, once sequenced or when their insert was discarded.</summary>
+    internal void ForgetUnsequenced()
+    {
+        _unsequenced.Clear();
+        _awaiting.Clear();
+    }
+
+    /// <inheritdoc />
+    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        var inserted = InsertedEvents();
+        var saved = await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken).ConfigureAwait(false);
+        AwaitSequence(inserted);
+        return saved;
+    }
+
+    /// <inheritdoc />
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        var inserted = InsertedEvents();
+        var saved = base.SaveChanges(acceptAllChangesOnSuccess);
+        AwaitSequence(inserted);
+        return saved;
+    }
+
+    // An insert never carries a sequence: the sequence is taken after the insert, as the transaction's last
+    // lock, and one an entity still holds from an attempt that rolled back belongs to a counter value that will
+    // be handed out again.
+    private List<EventRow> InsertedEvents()
+    {
+        var inserted = ChangeTracker.Entries<EventRow>()
+            .Where(e => e.State == EntityState.Added)
+            .Select(e => e.Entity)
+            .ToList();
+        foreach (var row in inserted)
+            row.CommitSequence = null;
+        return inserted;
+    }
+
+    private void AwaitSequence(List<EventRow> inserted)
+    {
+        foreach (var row in inserted)
+        {
+            if (_awaiting.Add(row))
+                _unsequenced.Add(row);
+        }
+    }
 
     /// <inheritdoc />
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -63,7 +123,15 @@ public sealed class EventStoreDbContext : DbContext
             b.Property(e => e.ContentType).HasMaxLength(128);
             b.HasIndex(e => new { e.Domain, e.StreamId, e.StreamVersion }).IsUnique();
             b.HasIndex(e => new { e.Domain, e.StreamId, e.EventId }).IsUnique();
-            b.HasIndex(e => new { e.Domain, e.Position });
+            b.HasIndex(e => new { e.Domain, e.CommitSequence });
+        });
+
+        modelBuilder.Entity<SequenceRow>(b =>
+        {
+            b.ToTable("es_sequence");
+            b.HasKey(s => s.Id);
+            b.Property(s => s.Id).ValueGeneratedNever();
+            b.HasData(new SequenceRow { Id = SequenceId, Last = 0 });
         });
 
         modelBuilder.Entity<SnapshotRow>(b =>

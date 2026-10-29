@@ -39,6 +39,9 @@ namespace Dbosoft.EventStore.EfCore.Sqlite.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("CommitSequence")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ContentType")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -77,7 +80,7 @@ namespace Dbosoft.EventStore.EfCore.Sqlite.Migrations
 
                     b.HasKey("Position");
 
-                    b.HasIndex("Domain", "Position");
+                    b.HasIndex("Domain", "CommitSequence");
 
                     b.HasIndex("Domain", "StreamId", "EventId")
                         .IsUnique();
@@ -86,6 +89,26 @@ namespace Dbosoft.EventStore.EfCore.Sqlite.Migrations
                         .IsUnique();
 
                     b.ToTable("es_events", (string)null);
+                });
+
+            modelBuilder.Entity("Dbosoft.EventStore.EfCore.SequenceRow", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Last")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("es_sequence", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Last = 0L
+                        });
                 });
 
             modelBuilder.Entity("Dbosoft.EventStore.EfCore.SnapshotRow", b =>

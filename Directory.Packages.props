@@ -21,8 +21,9 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.0" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
     <PackageVersion Include="Rebus" Version="8.9.2" />
-    <!-- Pin above the vulnerable 9.0.0 that EF Core Design pulls in transitively at design time. -->
-    <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.10" />
+    <!-- Pin above the vulnerable versions that EF Core Design and the SQL Server client pull in transitively. -->
+    <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.14" />
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
     <!-- Pin the native SQLite lib above the vulnerable 2.1.11 that EF Core Sqlite 10.0.0 pulls in. -->
     <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
     <PackageVersion Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
@@ -36,9 +37,9 @@
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.2" />
     <PackageVersion Include="AwesomeAssertions" Version="9.4.0" />
     <PackageVersion Include="NSubstitute" Version="6.0.0" />
-    <PackageVersion Include="Testcontainers.MsSql" Version="4.6.0" />
-    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.6.0" />
-    <PackageVersion Include="Testcontainers.Azurite" Version="4.6.0" />
+    <PackageVersion Include="Testcontainers.MsSql" Version="4.16.0" />
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.16.0" />
+    <PackageVersion Include="Testcontainers.Azurite" Version="4.16.0" />
   </ItemGroup>
 
 </Project>

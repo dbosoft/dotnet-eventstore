@@ -11,7 +11,9 @@ namespace Dbosoft.EventStore.Subscriptions;
 /// <list type="bullet">
 /// <item>
 /// With it, a forward read from a position is complete and never re-surfaces an event, so the
-/// subscription simply forwards each event and advances the checkpoint (the fast path).
+/// subscription simply forwards each event and advances the checkpoint (the fast path). The checkpoint
+/// advances only at the end of a pump, so a handler that throws makes the next pump read the events before
+/// it again; the de-duplication window keeps those from reaching the handler twice in this process.
 /// </item>
 /// <item>
 /// Without it, positions are assigned before the commit that makes an event visible, so a naive forward
@@ -173,11 +175,10 @@ public sealed class EventStoreSubscription
                 if (stored.CreatedAt > horizon)
                     break; // too fresh; hold it (and everything after) for a later pump
 
-                if (_exactCatchup || !AlreadySeen(stored.EventId))
+                if (!AlreadySeen(stored.EventId))
                 {
                     await _handler(stored, ct).ConfigureAwait(false);
-                    if (!_exactCatchup)
-                        Record(stored.EventId); // record only after success, so a throw re-delivers
+                    Record(stored.EventId); // record only after success, so a throw re-delivers
                     dispatched++;
                 }
 

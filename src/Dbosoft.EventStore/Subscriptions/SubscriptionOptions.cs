@@ -8,10 +8,10 @@ public sealed record SubscriptionOptions
     public GlobalPosition StartFrom { get; init; } = GlobalPosition.Start;
 
     /// <summary>
-    /// How many recently delivered <see cref="StoredEvent.EventId"/>s to remember for de-duplication on a
-    /// store without <see cref="StoreCapabilities.ExactCatchup"/>. A re-read must not span more events than
-    /// this or a duplicate could slip through; the default covers a generous overlap. Ignored on an
-    /// exact-catch-up store, which never re-surfaces an event.
+    /// How many recently delivered <see cref="StoredEvent.EventId"/>s to remember for de-duplication. A store
+    /// without <see cref="StoreCapabilities.ExactCatchup"/> re-reads across its safety window; any store re-reads
+    /// the events before a handler that threw. A re-read must not span more events than this or a duplicate could
+    /// slip through; the default covers a generous overlap.
     /// </summary>
     public int DeduplicationWindow { get; init; } = 4096;
 

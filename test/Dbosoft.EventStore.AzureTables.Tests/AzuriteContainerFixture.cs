@@ -13,7 +13,7 @@ public sealed class AzuriteContainerFixture : IAsyncLifetime
     // A current Azurite image: the one Testcontainers pins by default is too old for the API version
     // the Azure Storage SDK sends.
     private readonly AzuriteContainer _container =
-        new AzuriteBuilder().WithImage("mcr.microsoft.com/azure-storage/azurite:latest").Build();
+        new AzuriteBuilder("mcr.microsoft.com/azure-storage/azurite:3.37.0").Build();
 
     public string ConnectionString => _container.GetConnectionString();
 

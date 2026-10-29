@@ -21,8 +21,9 @@ public static class RebusEventStoreUnitOfWorkExtensions
     /// <see cref="ITransactionContext.Items"/> by its own <c>DbContext</c> setup. The store's appends in the
     /// handler enlist onto it and stage there. The <em>message's</em> unit of work owns the commit: committing
     /// that one shared transaction makes both the app's staged state and the enlisted events durable together.
-    /// The store does not commit or roll it back — it only fires its deferred change signals once the
-    /// transaction has committed. Both writers must share the same open <see cref="DbConnection"/> instance (a
+    /// It calls <see cref="EventStoreMessageTransaction.PrepareEventStoreAsync"/> right before that commit, after
+    /// flushing its own writes. The store does not commit or roll it back — it only fires its deferred change
+    /// signals once the transaction has committed. Both writers must share the same open <see cref="DbConnection"/> instance (a
     /// shared connection string is not enough — that is two connections and two transactions). A message whose
     /// resolver returns <c>null</c> runs with no frame, exactly as without this integration.
     /// </summary>

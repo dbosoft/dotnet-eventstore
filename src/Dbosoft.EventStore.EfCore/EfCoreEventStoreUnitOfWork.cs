@@ -46,9 +46,18 @@ internal sealed class EfCoreEventStoreUnitOfWork(
     }
 
     /// <inheritdoc />
+    public async ValueTask PrepareAsync(CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(!IsActive, this);
+        if (_context is not null)
+            await _context.AssignCommitSequenceAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async ValueTask CommitAsync(CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(!IsActive, this);
+        await PrepareAsync(ct).ConfigureAwait(false);
         await transaction.CommitAsync(ct).ConfigureAwait(false);
         await CompleteAsync(ct).ConfigureAwait(false);
     }
@@ -58,6 +67,9 @@ internal sealed class EfCoreEventStoreUnitOfWork(
     {
         if (!IsActive)
             return;
+
+        // Events committed without a sequence never show in $all; the owner skipped PrepareAsync.
+        var unprepared = _context?.Unsequenced.Count ?? 0;
 
         // The frame is done the moment the transaction has committed: drop the ambient slot before running
         // the signals, so a signal that itself appends does so on its own, not against this spent transaction.
@@ -77,6 +89,11 @@ internal sealed class EfCoreEventStoreUnitOfWork(
         }
 
         _onCommitted.Clear();
+
+        if (unprepared > 0)
+            throw new InvalidOperationException(
+                $"The transaction was committed with {unprepared} event(s) that were never prepared for it; they are "
+                + "stored but not in $all. Call PrepareAsync on the unit of work right before committing its transaction.");
     }
 
     /// <inheritdoc />

@@ -7,23 +7,21 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Dbosoft.EventStore.EfCore.Tests;
 
 /// <summary>
-/// Builds a provider over a fresh SQLite shared-cache in-memory database, wired exactly as an app
-/// would (<c>AddEventStore(es =&gt; es.UseSqlite(...))</c>). Shared cache lets each context open its
-/// own connection to the same in-memory database, so concurrent appends run against real relational
-/// locking — a genuine test target, not a fake.
+/// Builds a provider over a fresh SQLite database file in write-ahead-log mode, wired exactly as an app
+/// would (<c>AddEventStore(es =&gt; es.UseSqlite(...))</c>). Each context opens its own connection to it, so
+/// concurrent appends run against SQLite's real locking as a deployment's file does: a writer that finds the
+/// database locked waits for it. A shared-cache in-memory database locks per table and fails at once instead;
+/// on it the concurrent conformance tests failed about one run in ten with raw SQLite errors ("cannot start a
+/// transaction within a transaction", "not an error"), on a file not in thirty.
 /// </summary>
 public sealed class SqliteEventStoreFixture : IDisposable
 {
-    private readonly SqliteConnection _keepAlive;
+    private readonly string _path = Path.Combine(Path.GetTempPath(), $"es-conformance-{Guid.NewGuid():N}.db");
     private readonly ServiceProvider _services;
 
     public SqliteEventStoreFixture()
     {
-        var connectionString = $"DataSource=file:memdb-{Guid.NewGuid():N}?mode=memory&cache=shared";
-
-        // Keep one connection open for the lifetime of the fixture, so the in-memory database survives.
-        _keepAlive = new SqliteConnection(connectionString);
-        _keepAlive.Open();
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = _path, Pooling = false }.ToString();
 
         var services = new ServiceCollection();
         services.AddEventStore(es => es
@@ -33,6 +31,7 @@ public sealed class SqliteEventStoreFixture : IDisposable
 
         using var ctx = _services.GetRequiredService<IDbContextFactory<EventStoreDbContext>>().CreateDbContext();
         ctx.Database.EnsureCreated();
+        ctx.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
     }
 
     public IEventStoreProvider Provider => _services.GetRequiredService<IEventStoreProvider>();
@@ -40,6 +39,16 @@ public sealed class SqliteEventStoreFixture : IDisposable
     public void Dispose()
     {
         _services.Dispose();
-        _keepAlive.Dispose();
+        foreach (var file in new[] { _path, _path + "-wal", _path + "-shm" })
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch (IOException)
+            {
+                // A file still held by a closing connection is left to the temp folder's cleanup.
+            }
+        }
     }
 }

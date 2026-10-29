@@ -25,7 +25,9 @@ internal sealed class EfCoreEventStore(
 {
     protected override string NotifyDomain => domain;
 
-    public override StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory;
+    // $all is read by commit sequence, which follows commit order (see CommitSequencing): a reader never
+    // passes an event that commits after it.
+    public override StoreCapabilities Capabilities => StoreCapabilities.SnapshotHistory | StoreCapabilities.ExactCatchup;
 
     protected override async Task<AppendResult> AppendToStreamCoreAsync(
         string streamId,
@@ -69,7 +71,8 @@ internal sealed class EfCoreEventStore(
         // and retries as a whole, so there is no in-place reclassification against the frame's own uncommitted
         // (and, after a failed save, doomed) transaction.
         await ctx.SaveEnlistedChangesAsync(ct).ConfigureAwait(false);
-        return new AppendResult(outcome.StagedVersion, GlobalPosition.FromSequence(outcome.StagedLastRow!.Position));
+        // The position is the commit sequence, taken when the frame is prepared for its commit.
+        return new AppendResult(outcome.StagedVersion, null);
     }
 
     private async Task<AppendResult> AppendAutonomousAsync(
@@ -94,8 +97,8 @@ internal sealed class EfCoreEventStore(
 
             try
             {
-                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-                return new AppendResult(outcome.StagedVersion, GlobalPosition.FromSequence(outcome.StagedLastRow!.Position));
+                await ctx.SaveSequencedAsync(ct).ConfigureAwait(false);
+                return new AppendResult(outcome.StagedVersion, PositionOf(outcome.StagedLastRow!.CommitSequence));
             }
             catch (Exception ex) when (ex is DbUpdateConcurrencyException or DbUpdateException)
             {
@@ -115,15 +118,20 @@ internal sealed class EfCoreEventStore(
 
                 var stored = await check.Events
                     .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
-                    .Select(e => new { e.StreamVersion, e.Position })
+                    .Select(e => new { e.StreamVersion, e.CommitSequence })
                     .ToListAsync(ct).ConfigureAwait(false);
 
                 if (stored.Count == events.Count)
                 {
                     // A concurrent writer stored this exact batch first: idempotent replay.
                     var last = stored.MaxBy(e => e.StreamVersion)!;
-                    return new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+                    return new AppendResult(last.StreamVersion, PositionOf(last.CommitSequence));
                 }
+
+                // Chosen as a deadlock victim (or another transient failure) against a concurrent writer whose
+                // commit is perhaps not visible yet: nothing tells the outcome, so try again.
+                if (IsTransient(ex) && attempt < maxAttempts)
+                    continue;
 
                 if (stored.Count == 0 && actual == outcome.CurrentVersion)
                     throw; // nothing changed and the batch is absent — not a concurrency conflict
@@ -164,7 +172,7 @@ internal sealed class EfCoreEventStore(
         {
             var existing = await ctx.Events
                 .Where(e => e.Domain == domain && e.StreamId == streamId && batchIds.Contains(e.EventId))
-                .Select(e => new { e.StreamVersion, e.Position })
+                .Select(e => new { e.StreamVersion, e.CommitSequence })
                 .ToListAsync(ct).ConfigureAwait(false);
 
             if (existing.Count == events.Count)
@@ -172,7 +180,7 @@ internal sealed class EfCoreEventStore(
                 // Exact replay of an already-stored batch: return the outcome of the original append.
                 var last = existing.MaxBy(e => e.StreamVersion)!;
                 return StageOutcome.Done(
-                    new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position)), current);
+                    new AppendResult(last.StreamVersion, PositionOf(last.CommitSequence)), current);
             }
 
             if (existing.Count > 0)
@@ -264,7 +272,19 @@ internal sealed class EfCoreEventStore(
         // otherwise it owns one context and transaction so every stream's rows commit together or not at all.
         if (context.Enlisted is { } enlisted)
             return await AppendToStreamsEnlistedAsync(enlisted, appends, ct).ConfigureAwait(false);
-        return await AppendToStreamsAutonomousAsync(appends, ct).ConfigureAwait(false);
+        // A transient failure (a deadlock victim) leaves the outcome unknown while the other writer has not
+        // committed: the whole batch is tried again, which then lands or reconciles to an idempotent replay.
+        const int maxAttempts = 16;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await AppendToStreamsAutonomousAsync(appends, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            {
+            }
+        }
     }
 
     private async Task<IReadOnlyList<AppendResult>> AppendToStreamsAutonomousAsync(
@@ -303,7 +323,7 @@ internal sealed class EfCoreEventStore(
         {
             try
             {
-                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                await ctx.SaveSequencedAsync(ct).ConfigureAwait(false);
                 await tx.CommitAsync(ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is DbUpdateException or DbUpdateConcurrencyException)
@@ -373,7 +393,7 @@ internal sealed class EfCoreEventStore(
         {
             if (stagedLastRow[i] is not { } row)
                 continue;
-            results[i] = new AppendResult(stagedVersion[i], GlobalPosition.FromSequence(row.Position));
+            results[i] = new AppendResult(stagedVersion[i], PositionOf(row.CommitSequence));
             anyStaged = true;
         }
 
@@ -415,13 +435,13 @@ internal sealed class EfCoreEventStore(
             var batchIds = append.Events.Select(e => e.EventId).ToHashSet();
             var stored = await ctx.Events.AsNoTracking()
                 .Where(e => e.Domain == domain && e.StreamId == append.StreamId && batchIds.Contains(e.EventId))
-                .Select(e => new { e.StreamVersion, e.Position })
+                .Select(e => new { e.StreamVersion, e.CommitSequence })
                 .ToListAsync(ct).ConfigureAwait(false);
             storedCounts[i] = stored.Count;
             if (stored.Count == append.Events.Count)
             {
                 var last = stored.MaxBy(e => e.StreamVersion)!;
-                replays[i] = new AppendResult(last.StreamVersion, GlobalPosition.FromSequence(last.Position));
+                replays[i] = new AppendResult(last.StreamVersion, PositionOf(last.CommitSequence));
             }
         }
 
@@ -468,6 +488,16 @@ internal sealed class EfCoreEventStore(
     }
 
     // Whether the caller left the target version open, so a lost race can be retried rather than failed.
+    private static bool IsTransient(Exception ex)
+    {
+        for (var inner = ex; inner is not null; inner = inner.InnerException)
+        {
+            if (inner is System.Data.Common.DbException { IsTransient: true })
+                return true;
+        }
+        return false;
+    }
+
     private static bool IsVersionAgnostic(long expectedVersion, long actualVersion) =>
         expectedVersion == ExpectedVersion.Any
         || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);
@@ -490,8 +520,8 @@ internal sealed class EfCoreEventStore(
         var fromSequence = ToSequence(from);
         var query = ctx.Events.AsNoTracking().Where(e => e.Domain == domain);
         query = direction == ReadDirection.Forwards
-            ? query.Where(e => e.Position > fromSequence).OrderBy(e => e.Position)
-            : query.Where(e => e.Position < fromSequence).OrderByDescending(e => e.Position);
+            ? query.Where(e => e.CommitSequence > fromSequence).OrderBy(e => e.CommitSequence)
+            : query.Where(e => e.CommitSequence < fromSequence).OrderByDescending(e => e.CommitSequence);
 
         return maxCount < int.MaxValue ? query.Take((int)Math.Max(0, maxCount)) : query;
     }
@@ -635,9 +665,9 @@ internal sealed class EfCoreEventStore(
         context.ExecuteAsync(async ctx =>
         {
             var before = await ctx.Events.AsNoTracking()
-                .Where(e => e.Domain == domain && e.CreatedAt < timestamp)
-                .OrderByDescending(e => e.Position)
-                .Select(e => (long?)e.Position)
+                .Where(e => e.Domain == domain && e.CreatedAt < timestamp && e.CommitSequence != null)
+                .OrderByDescending(e => e.CommitSequence)
+                .Select(e => e.CommitSequence)
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
             return before is { } sequence ? GlobalPosition.FromSequence(sequence) : GlobalPosition.Start;
@@ -842,7 +872,7 @@ internal sealed class EfCoreEventStore(
 
             try
             {
-                await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                await ctx.SaveSequencedAsync(ct).ConfigureAwait(false);
                 if (tx is not null)
                     await tx.CommitAsync(ct).ConfigureAwait(false);
 
@@ -910,9 +940,13 @@ internal sealed class EfCoreEventStore(
             throw new WrongExpectedVersionException(streamId, expectedVersion, currentVersion);
     }
 
+    // An event read back inside the frame that wrote it has no sequence yet; it stands before every position.
     private static StoredEvent ToStored(EventRow row) =>
-        new(row.StreamId, row.StreamVersion, GlobalPosition.FromSequence(row.Position), row.EventId,
-            row.EventType, row.Data, row.Metadata, row.ContentType, row.CreatedAt);
+        new(row.StreamId, row.StreamVersion, row.CommitSequence is { } sequence ? GlobalPosition.FromSequence(sequence) : GlobalPosition.Start,
+            row.EventId, row.EventType, row.Data, row.Metadata, row.ContentType, row.CreatedAt);
+
+    private static GlobalPosition? PositionOf(long? commitSequence) =>
+        commitSequence is { } sequence ? GlobalPosition.FromSequence(sequence) : null;
 
     private static long ToSequence(GlobalPosition position)
     {
