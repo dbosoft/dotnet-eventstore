@@ -128,6 +128,11 @@ internal sealed class EfCoreEventStore(
                     return new AppendResult(last.StreamVersion, PositionOf(last.CommitSequence));
                 }
 
+                // Chosen as a deadlock victim (or another transient failure) against a concurrent writer whose
+                // commit is perhaps not visible yet: nothing tells the outcome, so try again.
+                if (IsTransient(ex) && attempt < maxAttempts)
+                    continue;
+
                 if (stored.Count == 0 && actual == outcome.CurrentVersion)
                     throw; // nothing changed and the batch is absent — not a concurrency conflict
 
@@ -267,7 +272,19 @@ internal sealed class EfCoreEventStore(
         // otherwise it owns one context and transaction so every stream's rows commit together or not at all.
         if (context.Enlisted is { } enlisted)
             return await AppendToStreamsEnlistedAsync(enlisted, appends, ct).ConfigureAwait(false);
-        return await AppendToStreamsAutonomousAsync(appends, ct).ConfigureAwait(false);
+        // A transient failure (a deadlock victim) leaves the outcome unknown while the other writer has not
+        // committed: the whole batch is tried again, which then lands or reconciles to an idempotent replay.
+        const int maxAttempts = 16;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await AppendToStreamsAutonomousAsync(appends, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsTransient(ex) && attempt < maxAttempts)
+            {
+            }
+        }
     }
 
     private async Task<IReadOnlyList<AppendResult>> AppendToStreamsAutonomousAsync(
@@ -471,6 +488,16 @@ internal sealed class EfCoreEventStore(
     }
 
     // Whether the caller left the target version open, so a lost race can be retried rather than failed.
+    private static bool IsTransient(Exception ex)
+    {
+        for (var inner = ex; inner is not null; inner = inner.InnerException)
+        {
+            if (inner is System.Data.Common.DbException { IsTransient: true })
+                return true;
+        }
+        return false;
+    }
+
     private static bool IsVersionAgnostic(long expectedVersion, long actualVersion) =>
         expectedVersion == ExpectedVersion.Any
         || (expectedVersion == ExpectedVersion.StreamExists && actualVersion > 0);

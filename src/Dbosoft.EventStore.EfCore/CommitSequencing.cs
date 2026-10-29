@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Linq.Expressions;
+using System.Runtime.ExceptionServices;
 using Microsoft.EntityFrameworkCore;
 
 namespace Dbosoft.EventStore.EfCore;
@@ -60,13 +61,22 @@ internal static class CommitSequencing
         }
 
         var strategy = ctx.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async token =>
+        try
         {
-            await using var tx = await ctx.Database.BeginTransactionAsync(token).ConfigureAwait(false);
-            await ctx.SaveChangesAsync(acceptAllChangesOnSuccess: false, token).ConfigureAwait(false);
-            await ctx.AssignCommitSequenceAsync(token).ConfigureAwait(false);
-            await tx.CommitAsync(token).ConfigureAwait(false);
-        }, ct).ConfigureAwait(false);
+            await strategy.ExecuteAsync(async token =>
+            {
+                await using var tx = await ctx.Database.BeginTransactionAsync(token).ConfigureAwait(false);
+                await ctx.SaveChangesAsync(acceptAllChangesOnSuccess: false, token).ConfigureAwait(false);
+                await ctx.AssignCommitSequenceAsync(token).ConfigureAwait(false);
+                await tx.CommitAsync(token).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex) when (ex.InnerException is DbUpdateException failedSave)
+        {
+            // A strategy that does not retry wraps a transient failure (a deadlock victim, say) to suggest
+            // retrying; the writers handle a failed save themselves, so they get it as one.
+            ExceptionDispatchInfo.Capture(failedSave).Throw();
+        }
         ctx.ChangeTracker.AcceptAllChanges();
     }
 
@@ -94,6 +104,19 @@ internal static class CommitSequencing
         }
     }
 
+    // Writing the sequences is part of the save too; see ReserveAsync.
+    private static async Task AsSaveAsync(Task<int> statement)
+    {
+        try
+        {
+            await statement.ConfigureAwait(false);
+        }
+        catch (DbException ex)
+        {
+            throw new DbUpdateException("Writing the commit sequence for the save failed.", ex);
+        }
+    }
+
     // Writes the sequences of a batch in one statement. The statement must find its rows by an index seek: a scan
     // would lock-wait on other transactions' uncommitted rows (SQL Server takes update locks while it reads), and
     // those transactions wait for the counter this one holds. Rows whose insert read back its row id are found by
@@ -105,9 +128,9 @@ internal static class CommitSequencing
         {
             Expression ByPosition(ParameterExpression row, EventRow stamped) =>
                 Expression.Equal(Expression.Property(row, nameof(EventRow.Position)), Expression.Constant(stamped.Position));
-            await ctx.Events
+            await AsSaveAsync(ctx.Events
                 .Where(AnyOf(batch, ByPosition))
-                .ExecuteUpdateAsync(s => s.SetProperty(e => e.CommitSequence, SequenceOf(batch, ByPosition)), ct)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.CommitSequence, SequenceOf(batch, ByPosition)), ct))
                 .ConfigureAwait(false);
             return;
         }
@@ -118,10 +141,10 @@ internal static class CommitSequencing
             var rows = stream.ToArray();
             Expression ByEventId(ParameterExpression row, EventRow stamped) =>
                 Expression.Equal(Expression.Property(row, nameof(EventRow.EventId)), Expression.Constant(stamped.EventId));
-            await ctx.Events
+            await AsSaveAsync(ctx.Events
                 .Where(e => e.Domain == domain && e.StreamId == streamId)
                 .Where(AnyOf(rows, ByEventId))
-                .ExecuteUpdateAsync(s => s.SetProperty(e => e.CommitSequence, SequenceOf(rows, ByEventId)), ct)
+                .ExecuteUpdateAsync(s => s.SetProperty(e => e.CommitSequence, SequenceOf(rows, ByEventId)), ct))
                 .ConfigureAwait(false);
         }
     }
