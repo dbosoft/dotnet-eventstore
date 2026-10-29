@@ -117,6 +117,10 @@ forward read could skip an event that commits *below* a position it has already 
 an event newer than `SafetyWindow`, so a not-yet-committed lower sibling is never skipped — completeness holds
 provided no append stays uncommitted longer than the window (the price is that much delivery latency).
 
+A time-started subscription (`StartingAtAsync`) finds its start by when events were *appended*, while `$all` on
+EF Core is ordered by when they *committed*: an event appended before the start time but committed after a later
+one can stand behind the start and be passed over. Start by position where every event counts.
+
 On every store, the checkpoint advances at the end of a pump, so after a handler throws the next pump reads
 the events before it again; de-duplication by `EventId` over a bounded window keeps them from reaching the
 handler twice in the same process.

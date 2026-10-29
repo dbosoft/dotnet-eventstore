@@ -83,7 +83,8 @@ public sealed class RebusEventStoreUnitOfWorkTests
     }
 
     // Stands in for the app's own per-message transaction setup: opens one shared connection + transaction
-    // for the message, stashes it for the handler, commits it when the message commits, and disposes it after.
+    // for the message, stashes it for the handler, prepares the store's frame and commits when the message
+    // commits, and disposes it after.
     private static Func<ITransactionContext, (DbConnection Connection, DbTransaction Transaction)?> OpenSharedTransaction(
         string connectionString) =>
         transactionContext =>
@@ -96,7 +97,11 @@ public sealed class RebusEventStoreUnitOfWorkTests
             var transaction = connection.BeginTransaction();
             transactionContext.Items["connection"] = connection;
             transactionContext.Items["transaction"] = transaction;
-            transactionContext.OnCommit(_ => transaction.CommitAsync());
+            transactionContext.OnCommit(async _ =>
+            {
+                await transactionContext.PrepareEventStoreAsync();
+                await transaction.CommitAsync();
+            });
             transactionContext.OnDisposed(_ =>
             {
                 transaction.Dispose();

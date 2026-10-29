@@ -43,15 +43,20 @@ public sealed class EventStoreDbContext : DbContext
     /// <summary>The id of the one counter row.</summary>
     internal const int SequenceId = 1;
 
-    // Event rows this context inserted that have no commit sequence yet. Collected on save, so every enlisted
-    // insert — an append, a maintenance marker — is sequenced at prepare without each writer having to remember it.
+    // Event rows this context inserted that have no commit sequence yet, in insert order. Collected on save, so
+    // every insert — an append, a maintenance marker — is sequenced without each writer having to remember it.
     private readonly List<EventRow> _unsequenced = [];
+    private readonly HashSet<EventRow> _awaiting = new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>Event rows this context has inserted and not yet given a commit sequence.</summary>
+    /// <summary>Event rows this context has inserted and not yet given a commit sequence, in insert order.</summary>
     internal IReadOnlyList<EventRow> Unsequenced => _unsequenced;
 
-    /// <summary>Drops the rows waiting for a sequence, for when their insert was discarded.</summary>
-    internal void ForgetUnsequenced() => _unsequenced.Clear();
+    /// <summary>Drops the rows waiting for a sequence, once sequenced or when their insert was discarded.</summary>
+    internal void ForgetUnsequenced()
+    {
+        _unsequenced.Clear();
+        _awaiting.Clear();
+    }
 
     /// <inheritdoc />
     public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
@@ -71,18 +76,25 @@ public sealed class EventStoreDbContext : DbContext
         return saved;
     }
 
-    // Rows inserted without a sequence are the ones an enlisted append leaves for the frame's PrepareAsync; an
-    // autonomous save gives its rows their sequence before inserting them.
-    private List<EventRow> InsertedEvents() => ChangeTracker.Entries<EventRow>()
-        .Where(e => e.State == EntityState.Added && e.Entity.CommitSequence is null)
-        .Select(e => e.Entity)
-        .ToList();
+    // An insert never carries a sequence: the sequence is taken after the insert, as the transaction's last
+    // lock, and one an entity still holds from an attempt that rolled back belongs to a counter value that will
+    // be handed out again.
+    private List<EventRow> InsertedEvents()
+    {
+        var inserted = ChangeTracker.Entries<EventRow>()
+            .Where(e => e.State == EntityState.Added)
+            .Select(e => e.Entity)
+            .ToList();
+        foreach (var row in inserted)
+            row.CommitSequence = null;
+        return inserted;
+    }
 
     private void AwaitSequence(List<EventRow> inserted)
     {
         foreach (var row in inserted)
         {
-            if (!_unsequenced.Contains(row))
+            if (_awaiting.Add(row))
                 _unsequenced.Add(row);
         }
     }

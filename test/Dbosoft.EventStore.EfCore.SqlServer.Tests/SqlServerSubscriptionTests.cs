@@ -29,7 +29,7 @@ public sealed class SqlServerSubscriptionTests(SqlServerContainerFixture contain
         {
             delivered.Add(e.StreamId);
             return Task.CompletedTask;
-        }, new SubscriptionOptions { SafetyWindow = TimeSpan.FromSeconds(1) });
+        });
 
         await using var conn = new SqlConnection(testStore.ConnectionString);
         await conn.OpenAsync();
@@ -59,6 +59,36 @@ public sealed class SqlServerSubscriptionTests(SqlServerContainerFixture contain
         await subscription.PumpAsync();
 
         delivered.Should().BeEquivalentTo(["late", "early"]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_append_to_a_stream_an_open_frame_also_writes_waits_for_it_and_neither_deadlocks(bool readCommittedSnapshot)
+    {
+        await using var testStore = await SqlServerTestStore.CreateAsync(container.ConnectionString, readCommittedSnapshot);
+        var store = testStore.Provider.GetStore("test");
+
+        await using var conn = new SqlConnection(testStore.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        Task other;
+        await using (var unitOfWork = testStore.UnitOfWorks.Enlist(conn, tx))
+        {
+            await store.AppendToStreamAsync("s", ExpectedVersion.Any, Events(1));
+
+            // An append of its own to the same stream waits on the frame's stream head. Were the store's commit
+            // order taken before that head, the frame's own prepare would wait on it in turn.
+            using (ExecutionContext.SuppressFlow())
+                other = Task.Run(() => store.AppendToStreamAsync("s", ExpectedVersion.Any, Events(1)));
+            await Task.WhenAny(other, Task.Delay(TimeSpan.FromSeconds(1)));
+
+            await unitOfWork.CommitAsync();
+        }
+        await other.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var all = await ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).ToListAsync();
+        all.Select(e => e.StreamVersion).Should().Equal(1, 2);
     }
 
     private sealed class Checkpoints : ICheckpointStore

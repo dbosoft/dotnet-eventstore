@@ -8,9 +8,10 @@ namespace Dbosoft.EventStore.Rebus;
 /// Incoming pipeline step that opens an event store unit-of-work frame for the message before it is
 /// dispatched, so an append in the handler enlists onto the message's transaction. The message's own unit of
 /// work owns the commit — committing that one shared transaction makes both the app's staged state and the
-/// enlisted events durable. So the frame does not commit or roll the transaction back; it only fires its
-/// deferred change signals once the transaction has committed, and releases its context when the context is
-/// disposed (which also discards the signals untouched if the message failed).
+/// enlisted events durable. So the frame does not commit or roll the transaction back; the owner prepares it
+/// right before committing (see <see cref="EventStoreMessageTransaction.PrepareEventStoreAsync"/>), and the frame
+/// fires its deferred change signals once the transaction has committed and releases its context when the
+/// context is disposed (which also discards the signals untouched if the message failed).
 /// </summary>
 internal sealed class EnlistEventStoreUnitOfWorkStep(
     IEventStoreUnitOfWorkFactory unitOfWorkFactory,
@@ -29,6 +30,7 @@ internal sealed class EnlistEventStoreUnitOfWorkStep(
         }
 
         var unitOfWork = unitOfWorkFactory.Enlist(resolved.Connection, resolved.Transaction);
+        EventStoreMessageTransaction.Remember(transactionContext, unitOfWork);
 
         // OnAck runs after the message's transaction has committed (the app's own OnCommit did the commit) —
         // fire the deferred signals then. A failed message never acks, so its signals are simply dropped when
@@ -37,11 +39,6 @@ internal sealed class EnlistEventStoreUnitOfWorkStep(
         transactionContext.OnDisposed(_ => FireAndForgetDispose(unitOfWork));
 
         await next().ConfigureAwait(false);
-
-        // The message's unit of work shared the transaction before this step ran, so it commits only after this
-        // step returns: preparing here is the last thing before that commit, and holds the store's commit order
-        // for no longer than the owner's own flush and commit.
-        await unitOfWork.PrepareAsync().ConfigureAwait(false);
     }
 
     // OnDisposed is synchronous and runs after the message has committed or failed, so releasing the frame's

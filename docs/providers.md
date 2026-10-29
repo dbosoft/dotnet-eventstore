@@ -185,8 +185,8 @@ the autonomous one, by necessity:
   commit and `CompleteAsync()` after it; a commit without `PrepareAsync` leaves the events out of `$all`, and
   `CompleteAsync` throws to say so. Nothing slow belongs between `PrepareAsync` and the commit: from there to the
   commit, other committing writers wait.
-- Snapshot writes and reads run on the frame's connection, so a read inside the frame sees the frame's own
-  uncommitted writes.
+- Snapshot and checkpoint writes and the reads run on the frame's connection, so a read inside the frame sees
+  the frame's own uncommitted writes — except in `$all`, which holds only events with a commit sequence.
 
 A `NonRetryingExecutionStrategy` is forced on the enlisted context even when the app enabled
 `EnableRetryOnFailure`, because a retrying strategy refuses a user-initiated transaction.
