@@ -10,7 +10,7 @@ namespace Dbosoft.EventStore.EfCore.PostgreSql.Tests;
 [UsedImplicitly]
 public sealed class PostgreSqlContainerFixture : IAsyncLifetime
 {
-    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder().Build();
+    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:15.1").Build();
 
     public string ConnectionString => _container.GetConnectionString();
 

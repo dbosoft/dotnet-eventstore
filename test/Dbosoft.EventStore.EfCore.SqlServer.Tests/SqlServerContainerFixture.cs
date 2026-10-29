@@ -10,7 +10,7 @@ namespace Dbosoft.EventStore.EfCore.SqlServer.Tests;
 [UsedImplicitly]
 public sealed class SqlServerContainerFixture : IAsyncLifetime
 {
-    private readonly MsSqlContainer _container = new MsSqlBuilder().Build();
+    private readonly MsSqlContainer _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU14-ubuntu-22.04").Build();
 
     public string ConnectionString => _container.GetConnectionString();
 
