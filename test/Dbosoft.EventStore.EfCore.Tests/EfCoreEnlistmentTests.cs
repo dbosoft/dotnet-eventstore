@@ -176,6 +176,30 @@ public sealed class EfCoreEnlistmentTests
         all.Select(e => e.Position).Should().BeInAscendingOrder().And.OnlyHaveUniqueItems();
     }
 
+    // $all is how a read model folds a stream; a stream's events out of their order fold to a state the
+    // stream never had, and a reader that skips versions it already saw drops the earlier one.
+    [Fact]
+    public async Task A_frame_appending_to_a_stream_again_and_again_puts_its_events_into_all_in_their_order()
+    {
+        await using var harness = Harness.Create();
+        var store = harness.Store;
+
+        await using (var conn = await harness.OpenConnectionAsync())
+        await using (var tx = await conn.BeginTransactionAsync())
+        {
+            await using var unitOfWork = harness.UnitOfWorkFactory.Enlist(conn, tx);
+            for (var round = 0; round < 3; round++)
+            for (var stream = 0; stream < 20; stream++)
+                await store.AppendToStreamAsync($"s{stream}", round == 0 ? ExpectedVersion.NoStream : round * 2, Events(2));
+            await unitOfWork.CommitAsync();
+        }
+
+        var all = await ((IAllStreamReader)store).ReadAllAsync(GlobalPosition.Start).ToListAsync();
+        all.Should().HaveCount(120);
+        foreach (var stream in all.GroupBy(e => e.StreamId))
+            stream.Select(e => e.StreamVersion).Should().Equal([1, 2, 3, 4, 5, 6], $"stream {stream.Key} is read in its order");
+    }
+
     [Fact]
     public async Task An_enlisted_append_at_a_wrong_expected_version_throws_and_the_stream_is_unchanged()
     {
