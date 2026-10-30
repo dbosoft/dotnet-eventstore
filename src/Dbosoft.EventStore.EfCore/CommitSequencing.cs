@@ -32,7 +32,14 @@ internal static class CommitSequencing
     /// </summary>
     public static async Task AssignCommitSequenceAsync(this EventStoreDbContext ctx, CancellationToken ct)
     {
-        var rows = ctx.Unsequenced;
+        // The rows come in the order the change tracker listed them on each save, which is not the order they
+        // were appended in: a stream's events are put back in version order, each stream where it first appeared.
+        var rows = ctx.Unsequenced
+            .Select((row, index) => (Row: row, Index: index))
+            .GroupBy(r => (r.Row.Domain, r.Row.StreamId))
+            .OrderBy(stream => stream.Min(r => r.Index))
+            .SelectMany(stream => stream.Select(r => r.Row).OrderBy(r => r.StreamVersion))
+            .ToList();
         if (rows.Count == 0)
             return;
 
